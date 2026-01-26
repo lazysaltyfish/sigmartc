@@ -1,18 +1,10 @@
 # syntax=docker/dockerfile:1
 
-FROM debian:bookworm-slim AS builder
+FROM golang:1.25.6-alpine AS builder
 
 WORKDIR /src
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tar \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY go1.25.5.linux-amd64.tar.gz /tmp/go.tgz
-RUN tar -C /usr/local -xzf /tmp/go.tgz \
-    && rm /tmp/go.tgz
-
-ENV PATH=/usr/local/go/bin:$PATH
+RUN apk add --no-cache ca-certificates
 
 COPY go.mod go.sum ./
 RUN go mod download

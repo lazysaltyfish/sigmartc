@@ -3,6 +3,7 @@ bin
 server.log
 banned_ips.json
 *.log
+go*.tar.gz
 task_plan.md
 findings.md
 progress.md
