@@ -1,0 +1,34 @@
+# Build outputs
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go tooling
+*.test
+*.out
+*.prof
+*.cover
+go1.25.5.linux-amd64.tar.gz
+
+# Runtime data
+server.log
+*.log
+banned_ips.json
+
+# Local tooling artifacts
+.sisyphus/
+
+# Editor/OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Agent planning files
+/task_plan.md
+/findings.md
+/progress.md

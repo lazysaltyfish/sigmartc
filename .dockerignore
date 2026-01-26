@@ -1,0 +1,8 @@
+.git
+bin
+server.log
+banned_ips.json
+*.log
+task_plan.md
+findings.md
+progress.md
