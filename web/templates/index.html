@@ -53,26 +53,30 @@
                         <!-- Avatars will be injected here -->
                     </div>
                     <div id="mixer-panel" class="mixer-panel" aria-live="polite">
-                        <div class="mixer-section">
-                            <div class="mixer-title">麦克风增益</div>
-                            <div class="mixer-row">
-                                <span class="mixer-label">我</span>
-                                <input id="mic-gain" class="mixer-slider" type="range" min="0" max="200" value="100" step="1" aria-label="麦克风增益">
-                                <span id="mic-gain-value" class="mixer-value">100%</span>
+                        <div class="mixer-global">
+                            <div class="mixer-section">
+                                <div class="mixer-title">麦克风增益</div>
+                                <div class="mixer-row">
+                                    <span class="mixer-label">我</span>
+                                    <input id="mic-gain" class="mixer-slider" type="range" min="0" max="200" value="100" step="1" aria-label="麦克风增益">
+                                    <span id="mic-gain-value" class="mixer-value">100%</span>
+                                </div>
+                            </div>
+                            <div class="mixer-section">
+                                <div class="mixer-title">播放设备</div>
+                                <div class="mixer-row mixer-row-select">
+                                    <span class="mixer-label">输出</span>
+                                    <select id="playback-device" class="mixer-select" aria-label="播放设备"></select>
+                                </div>
+                                <div id="playback-help" class="mixer-help"></div>
                             </div>
                         </div>
-                        <div class="mixer-section">
-                            <div class="mixer-title">播放设备</div>
-                            <div class="mixer-row mixer-row-select">
-                                <span class="mixer-label">输出</span>
-                                <select id="playback-device" class="mixer-select" aria-label="播放设备"></select>
+                        <div class="mixer-peers">
+                            <div class="mixer-section">
+                                <div class="mixer-title">成员音量</div>
+                                <div id="peer-volume-list" class="mixer-list"></div>
+                                <div id="peer-volume-empty" class="mixer-empty">暂无其他成员</div>
                             </div>
-                            <div id="playback-help" class="mixer-help"></div>
-                        </div>
-                        <div class="mixer-section">
-                            <div class="mixer-title">成员音量</div>
-                            <div id="peer-volume-list" class="mixer-list"></div>
-                            <div id="peer-volume-empty" class="mixer-empty">暂无其他成员</div>
                         </div>
                     </div>
                 </div>
