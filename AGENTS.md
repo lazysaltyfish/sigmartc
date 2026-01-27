@@ -126,9 +126,10 @@ Since this is a real-time networked application, automated unit tests are limite
 ## 8. Development Workflow (Human + AI)
 1. Format Go code with `gofmt -w` before commits.
 2. Run `go test ./...` (may be limited) and the manual verification checklist.
-3. Use `go mod tidy` after dependency changes.
-4. Keep docs in sync: `AGENTS.md`, `DESIGN.md`, `DEPLOY.md`, and `README.md`.
-5. Verify the StreamID mapping (sender PeerID) remains intact in `internal/server/handler.go`.
+3. Before every commit, ensure the relevant tests pass and there are no failing tests.
+4. Use `go mod tidy` after dependency changes.
+5. Keep docs in sync: `AGENTS.md`, `DESIGN.md`, `DEPLOY.md`, and `README.md`.
+6. Verify the StreamID mapping (sender PeerID) remains intact in `internal/server/handler.go`.
 
 ## 9. Repository Standards
 *   **Branching:** Use short-lived feature branches off `main` (e.g., `feat/vad-tuning`).

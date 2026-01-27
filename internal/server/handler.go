@@ -254,8 +254,14 @@ func (h *Handler) addTrackToPeer(receiver *Peer, senderID string, track *webrtc.
 		return
 	}
 
-	// Forward packets from remote track to local track
+	// Trigger renegotiation
+	h.sendNegotiationNeeded(receiver)
+
+	// Forward packets only after renegotiation is complete to avoid early SSRC drops.
 	go func() {
+		if !waitForNegotiationStable(receiver.PC, 10*time.Second) {
+			return
+		}
 		rtpBuf := make([]byte, 1500)
 		for {
 			n, _, err := track.Read(rtpBuf)
@@ -267,9 +273,6 @@ func (h *Handler) addTrackToPeer(receiver *Peer, senderID string, track *webrtc.
 			}
 		}
 	}()
-
-	// Trigger renegotiation
-	h.sendNegotiationNeeded(receiver)
 }
 
 func (h *Handler) sendNegotiationNeeded(peer *Peer) {
@@ -284,6 +287,31 @@ func (h *Handler) sendNegotiationNeeded(peer *Peer) {
 		"type": "offer",
 		"sdp":  offer.SDP,
 	})
+}
+
+func waitForNegotiationStable(pc *webrtc.PeerConnection, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	sawLocalOffer := false
+	for {
+		state := pc.SignalingState()
+		if state == webrtc.SignalingStateHaveLocalOffer {
+			sawLocalOffer = true
+		}
+		if sawLocalOffer && state == webrtc.SignalingStateStable && pc.RemoteDescription() != nil {
+			return true
+		}
+
+		select {
+		case <-deadline.C:
+			return false
+		case <-ticker.C:
+		}
+	}
 }
 
 func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]any) {
