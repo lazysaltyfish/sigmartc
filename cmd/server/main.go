@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"sigmartc/internal/logger"
 	"sigmartc/internal/server"
+	"strings"
 	"syscall"
 
 	"github.com/pion/ice/v2"
@@ -66,21 +67,21 @@ func main() {
 
 	// API & Signaling
 	mux.HandleFunc("/ws", h.HandleWS)
-	mux.HandleFunc("/admin", h.HandleAdmin)
+	mux.Handle("/admin", withSecurityHeaders(http.HandlerFunc(h.HandleAdmin)))
 
 	// Frontend Static Files
 	fs := http.FileServer(http.Dir("web/static"))
-	mux.Handle("/static/", http.StripPrefix("/static/", fs))
+	mux.Handle("/static/", withSecurityHeaders(http.StripPrefix("/static/", fs)))
 
 	// SPA Routing: All /r/* or / paths serve index.html
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// If it's the root or a room path, serve the app
 		if r.URL.Path == "/" || (len(r.URL.Path) > 3 && r.URL.Path[:3] == "/r/") {
 			http.ServeFile(w, r, "web/templates/index.html")
 			return
 		}
 		http.NotFound(w, r)
-	})
+	})))
 
 	// 5. Start Server
 	serverAddr := fmt.Sprintf(":%d", *port)
@@ -98,4 +99,43 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	slog.Info("Shutting down...")
+}
+
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setSecurityHeaders(w, r)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func setSecurityHeaders(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Permissions-Policy", "microphone=(self)")
+	w.Header().Set("Content-Security-Policy", buildCSP(r))
+}
+
+func buildCSP(r *http.Request) string {
+	host := r.Host
+	if xfwd := r.Header.Get("X-Forwarded-Host"); xfwd != "" {
+		parts := strings.Split(xfwd, ",")
+		host = strings.TrimSpace(parts[0])
+	}
+	host = strings.TrimSpace(host)
+	connectSrc := "'self' stun: turn: turns:"
+	if host != "" {
+		connectSrc = fmt.Sprintf("'self' ws://%s wss://%s stun: turn: turns:", host, host)
+	}
+	return strings.Join([]string{
+		"default-src 'self'",
+		"base-uri 'self'",
+		"frame-ancestors 'none'",
+		"form-action 'self'",
+		"script-src 'self'",
+		"style-src 'self' 'unsafe-inline'",
+		"img-src 'self' data:",
+		"media-src 'self' blob:",
+		"connect-src " + connectSrc,
+	}, "; ")
 }

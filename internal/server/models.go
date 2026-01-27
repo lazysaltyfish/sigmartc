@@ -22,8 +22,8 @@ type Peer struct {
 	WsMutex sync.Mutex
 
 	PC          *webrtc.PeerConnection
-	TrackRemote *webrtc.TrackRemote       
-	
+	TrackRemote *webrtc.TrackRemote
+
 	Muted    bool
 	JoinTime time.Time
 }
@@ -40,11 +40,11 @@ type Room struct {
 
 // RoomManager manages the lifecycle of rooms.
 type RoomManager struct {
-	Rooms      map[string]*Room
-	BannedIPs  map[string]bool
-	AdminKey   string
+	Rooms       map[string]*Room
+	BannedIPs   map[string]bool
+	AdminKey    string
 	BanListPath string
-	Lock       sync.RWMutex
+	Lock        sync.RWMutex
 }
 
 func NewRoomManager(adminKey string, banListPath string) *RoomManager {
@@ -61,21 +61,33 @@ func NewRoomManager(adminKey string, banListPath string) *RoomManager {
 
 func (rm *RoomManager) loadBanList() {
 	data, err := os.ReadFile(rm.BanListPath)
-	if err == nil {
-		json.Unmarshal(data, &rm.BannedIPs)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("Failed to read ban list", "err", err)
+		}
+		return
+	}
+	if err := json.Unmarshal(data, &rm.BannedIPs); err != nil {
+		slog.Error("Failed to parse ban list", "err", err)
 	}
 }
 
-func (rm *RoomManager) saveBanList() {
-	data, _ := json.Marshal(rm.BannedIPs)
-	os.WriteFile(rm.BanListPath, data, 0644)
+func (rm *RoomManager) saveBanList() error {
+	data, err := json.Marshal(rm.BannedIPs)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(rm.BanListPath, data, 0644)
 }
 
 func (rm *RoomManager) BanIP(ip string) {
 	rm.Lock.Lock()
 	rm.BannedIPs[ip] = true
-	rm.saveBanList()
+	saveErr := rm.saveBanList()
 	rm.Lock.Unlock()
+	if saveErr != nil {
+		slog.Error("Failed to save ban list", "err", saveErr)
+	}
 	logger.LogEvent("ADMIN_BAN", slog.String("ip", ip))
 }
 
@@ -132,12 +144,16 @@ func (rm *RoomManager) cleanup() {
 
 func (r *Room) Broadcast(senderID string, msg any) {
 	r.Lock.RLock()
-	defer r.Lock.RUnlock()
-
+	peers := make([]*Peer, 0, len(r.Peers))
 	for id, peer := range r.Peers {
 		if id == senderID {
 			continue
 		}
+		peers = append(peers, peer)
+	}
+	r.Lock.RUnlock()
+
+	for _, peer := range peers {
 		peer.WriteJSON(msg)
 	}
 }
@@ -146,6 +162,8 @@ func (p *Peer) WriteJSON(v any) {
 	p.WsMutex.Lock()
 	defer p.WsMutex.Unlock()
 	if p.Conn != nil {
-		p.Conn.WriteJSON(v)
+		if err := p.Conn.WriteJSON(v); err != nil {
+			slog.Warn("WS write failed", "peer_id", p.ID, "err", err)
+		}
 	}
 }

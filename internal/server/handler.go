@@ -2,10 +2,14 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -13,8 +17,13 @@ import (
 	"sigmartc/internal/logger"
 )
 
+const (
+	maxRoomPeers    = 10
+	maxNicknameRune = 12
+)
+
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: checkWSOrigin,
 }
 
 type Handler struct {
@@ -40,22 +49,14 @@ func NewHandler(rm *RoomManager, api *webrtc.API) *Handler {
 }
 
 func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
-	roomUUID := r.URL.Query().Get("room")
-	nickname := r.URL.Query().Get("name")
-
-	if roomUUID == "" || nickname == "" {
-		http.Error(w, "Missing room or name", http.StatusBadRequest)
+	roomUUID := strings.TrimSpace(r.URL.Query().Get("room"))
+	nickname, err := normalizeNickname(r.URL.Query().Get("name"))
+	if roomUUID == "" || err != nil {
+		http.Error(w, "Invalid room or name", http.StatusBadRequest)
 		return
 	}
 
-	ip := r.Header.Get("X-Forwarded-For")
-	if ip == "" {
-		ip = r.RemoteAddr
-	}
-	// Strip port if present
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		ip = ip[:idx]
-	}
+	ip := clientIP(r)
 
 	if h.RoomManager.IsBanned(ip) {
 		http.Error(w, "Banned", http.StatusForbidden)
@@ -81,7 +82,7 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Check capacity
 	room.Lock.Lock()
-	if len(room.Peers) >= 8 {
+	if len(room.Peers) >= maxRoomPeers {
 		room.Lock.Unlock()
 		peer.WriteJSON(map[string]string{"type": "error", "message": "Room full"})
 		conn.Close()
@@ -117,7 +118,10 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 	h.sendRoomState(room, peer)
 
 	// WebRTC Setup
-	h.setupWebRTC(room, peer)
+	if err := h.setupWebRTC(room, peer); err != nil {
+		peer.WriteJSON(map[string]string{"type": "error", "message": "WebRTC setup failed"})
+		return
+	}
 	h.addExistingTracks(room, peer)
 
 	// Signaling loop
@@ -138,15 +142,14 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) sendRoomState(room *Room, peer *Peer) {
 	room.Lock.RLock()
-	defer room.Lock.RUnlock()
-
-	peersInfo := []map[string]any{}
+	peersInfo := make([]map[string]any, 0, len(room.Peers))
 	for _, p := range room.Peers {
 		peersInfo = append(peersInfo, map[string]any{
 			"id":   p.ID,
 			"name": p.Name,
 		})
 	}
+	room.Lock.RUnlock()
 
 	peer.WriteJSON(map[string]any{
 		"type":    "room_state",
@@ -161,7 +164,7 @@ func (h *Handler) sendRoomState(room *Room, peer *Peer) {
 	})
 }
 
-func (h *Handler) setupWebRTC(room *Room, peer *Peer) {
+func (h *Handler) setupWebRTC(room *Room, peer *Peer) error {
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
@@ -171,7 +174,7 @@ func (h *Handler) setupWebRTC(room *Room, peer *Peer) {
 	pc, err := h.WebRTCAPI.NewPeerConnection(config)
 	if err != nil {
 		slog.Error("Failed to create PeerConnection", "err", err)
-		return
+		return err
 	}
 	peer.PC = pc
 
@@ -200,6 +203,7 @@ func (h *Handler) setupWebRTC(room *Room, peer *Peer) {
 		// Broadcast this new track to all other peers in the room
 		h.broadcastTrack(room, peer, track)
 	})
+	return nil
 }
 
 func (h *Handler) addExistingTracks(room *Room, receiver *Peer) {
@@ -225,12 +229,16 @@ func (h *Handler) addExistingTracks(room *Room, receiver *Peer) {
 
 func (h *Handler) broadcastTrack(room *Room, sender *Peer, track *webrtc.TrackRemote) {
 	room.Lock.RLock()
-	defer room.Lock.RUnlock()
-
+	receivers := make([]*Peer, 0, len(room.Peers))
 	for _, receiver := range room.Peers {
 		if receiver.ID == sender.ID {
 			continue
 		}
+		receivers = append(receivers, receiver)
+	}
+	room.Lock.RUnlock()
+
+	for _, receiver := range receivers {
 		h.addTrackToPeer(receiver, sender.ID, track)
 	}
 }
@@ -276,6 +284,9 @@ func (h *Handler) addTrackToPeer(receiver *Peer, senderID string, track *webrtc.
 }
 
 func (h *Handler) sendNegotiationNeeded(peer *Peer) {
+	if peer.PC == nil {
+		return
+	}
 	offer, err := peer.PC.CreateOffer(nil)
 	if err != nil {
 		return
@@ -319,6 +330,9 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 	if !ok {
 		return
 	}
+	if peer.PC == nil {
+		return
+	}
 
 	switch t {
 	case "offer":
@@ -354,7 +368,115 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 		candidateData, _ := msg["candidate"].(map[string]any)
 		candidateJSON, _ := json.Marshal(candidateData)
 		var candidate webrtc.ICECandidateInit
-		json.Unmarshal(candidateJSON, &candidate)
+		if err := json.Unmarshal(candidateJSON, &candidate); err != nil {
+			return
+		}
 		peer.PC.AddICECandidate(candidate)
 	}
+}
+
+func normalizeNickname(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", errors.New("missing name")
+	}
+	if utf8.RuneCountInString(name) > maxNicknameRune {
+		return "", errors.New("name too long")
+	}
+	return name, nil
+}
+
+func clientIP(r *http.Request) string {
+	remoteIP := parseRemoteIP(r.RemoteAddr)
+	if remoteIP != nil && isTrustedProxy(remoteIP) {
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+			if ip := net.ParseIP(realIP); ip != nil {
+				return ip.String()
+			}
+		}
+		if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+			parts := strings.Split(xff, ",")
+			for _, part := range parts {
+				candidate := strings.TrimSpace(part)
+				if candidate == "" {
+					continue
+				}
+				if ip := net.ParseIP(candidate); ip != nil {
+					return ip.String()
+				}
+			}
+		}
+	}
+
+	if remoteIP != nil {
+		return remoteIP.String()
+	}
+	return r.RemoteAddr
+}
+
+func checkWSOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	originURL, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if originURL.Host == "" {
+		return false
+	}
+
+	reqHost := requestHost(r)
+	originHost := stripPort(originURL.Host)
+	if reqHost == "" || originHost == "" {
+		return false
+	}
+	if !strings.EqualFold(reqHost, originHost) {
+		return false
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return strings.EqualFold(proto, originURL.Scheme)
+	}
+	return true
+}
+
+func requestHost(r *http.Request) string {
+	if xfwd := r.Header.Get("X-Forwarded-Host"); xfwd != "" {
+		parts := strings.Split(xfwd, ",")
+		return stripPort(strings.TrimSpace(parts[0]))
+	}
+	return stripPort(r.Host)
+}
+
+func stripPort(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if strings.HasPrefix(host, "[") {
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			return strings.Trim(h, "[]")
+		}
+		return strings.Trim(host, "[]")
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+func parseRemoteIP(remoteAddr string) net.IP {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return net.ParseIP(host)
+	}
+	return net.ParseIP(remoteAddr)
+}
+
+func isTrustedProxy(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
 }

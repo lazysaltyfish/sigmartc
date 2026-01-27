@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"strings"
 
 	"sigmartc/internal/logger"
 )
@@ -23,7 +24,12 @@ func (h *Handler) HandleAdmin(w http.ResponseWriter, r *http.Request) {
 	case "logs":
 		h.getLogs(w)
 	case "ban":
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		ip := r.URL.Query().Get("ip")
+		ip = strings.TrimSpace(ip)
 		if ip != "" {
 			h.RoomManager.BanIP(ip)
 			fmt.Fprintf(w, "Banned %s", ip)
@@ -73,20 +79,8 @@ func (h *Handler) serveAdminUI(w http.ResponseWriter) {
 		<div id="stats">Loading...</div>
 		<h2>Recent Logs</h2>
 		<pre id="logs" style="background:#000;padding:10px;overflow:auto;max-height:400px;"></pre>
-		<input id="banIp" placeholder="IP to ban"><button onclick="ban()">Ban</button>
-		<script>
-			const key = new URLSearchParams(window.location.search).get('key');
-			fetch('/admin?action=stats&key='+key).then(r=>r.json()).then(d=>{
-				document.getElementById('stats').innerText = JSON.stringify(d, null, 2);
-			});
-			fetch('/admin?action=logs&key='+key).then(r=>r.json()).then(d=>{
-				document.getElementById('logs').innerText = d.join('\n');
-			});
-			function ban() {
-				const ip = document.getElementById('banIp').value;
-				fetch('/admin?action=ban&ip='+ip+'&key='+key).then(()=>location.reload());
-			}
-		</script>
+		<input id="ban-ip" placeholder="IP to ban"><button id="ban-btn">Ban</button>
+		<script src="/static/js/admin.js"></script>
 	</body>
 	</html>
 	`)
