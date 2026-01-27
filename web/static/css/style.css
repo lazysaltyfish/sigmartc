@@ -166,6 +166,7 @@ input:focus-visible,
     display: flex;
     flex-direction: column;
     padding: 20px;
+    min-width: 0;
 }
 
 .stage-content {
@@ -174,6 +175,7 @@ input:focus-visible,
     display: grid;
     grid-template-columns: minmax(0, 1fr) 280px;
     gap: 16px;
+    min-width: 0;
 }
 
 .avatar-grid {
@@ -225,6 +227,7 @@ input:focus-visible,
     gap: 16px;
     max-height: 100%;
     overflow: auto;
+    min-width: 0;
 }
 
 .mixer-section {
@@ -247,7 +250,11 @@ input:focus-visible,
 }
 
 .mixer-row-select {
-    grid-template-columns: auto 1fr;
+    grid-template-columns: auto minmax(0, 1fr);
+}
+
+.mixer-row > * {
+    min-width: 0;
 }
 
 .mixer-label {
@@ -264,6 +271,12 @@ input:focus-visible,
     padding: 8px 10px;
     font-size: 0.9em;
     outline: none;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .mixer-select:focus-visible {
@@ -303,6 +316,8 @@ input:focus-visible,
 .mixer-help {
     color: var(--text-muted);
     font-size: 0.78em;
+    max-width: 100%;
+    word-break: break-word;
 }
 
 .footer {
