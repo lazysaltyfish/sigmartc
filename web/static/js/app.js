@@ -2,18 +2,67 @@ const config = {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
 };
 
+const audioControls = window.AudioControls || {
+    MAX_PERCENT: 200,
+    MIN_PERCENT: 0,
+    clampPercent: (value) => {
+        const num = Number(value);
+        if (Number.isNaN(num)) return 100;
+        return Math.min(200, Math.max(0, num));
+    },
+    percentToGain: (percent) => {
+        const num = Number(percent);
+        if (Number.isNaN(num)) return 1;
+        const clamped = Math.min(200, Math.max(0, num));
+        return clamped / 100;
+    },
+    gainToPercent: (gain) => {
+        const num = Number(gain);
+        if (Number.isNaN(num)) return 100;
+        return Math.min(200, Math.max(0, Math.round(num * 100)));
+    }
+};
+
+const { MAX_PERCENT, clampPercent, percentToGain } = audioControls;
+const isTestMode = Boolean(window.__TEST__);
+const audioDebug = isTestMode ? { micGain: 1, peerGains: {} } : null;
+if (audioDebug) {
+    window.__audioDebug = audioDebug;
+}
+
+let localRawStream;
 let localStream;
+let localAudioContext;
+let localGainNode;
+let remoteAudioContext;
+let testToneContext;
 let pc;
 let ws;
 let myId;
-let peers = new Map(); // peerId -> { name, element, pc? }
+let peers = new Map(); // peerId -> { name, volumePercent, gainNode, audioEl, sourceNode }
 let isMuted = false;
+let mixerOpen = false;
+let localName = '';
+let isLeaving = false;
+let notifiedDisconnect = false;
+let vadAudioContext;
+let pendingSelfVAD = null;
+const vadState = new Map();
+let makingOffer = false;
+let ignoreOffer = false;
+const isPolite = true;
 
 const joinView = document.getElementById('join-view');
 const roomView = document.getElementById('room-view');
 const userList = document.getElementById('user-list');
 const avatarGrid = document.getElementById('avatar-grid');
 const audioContainer = document.getElementById('audio-container');
+const mixerPanel = document.getElementById('mixer-panel');
+const micGainInput = document.getElementById('mic-gain');
+const micGainValue = document.getElementById('mic-gain-value');
+const peerVolumeList = document.getElementById('peer-volume-list');
+const peerVolumeEmpty = document.getElementById('peer-volume-empty');
+const btnMixer = document.getElementById('btn-mixer');
 
 // 1. Initialize URL and View
 const path = window.location.pathname;
@@ -31,11 +80,8 @@ document.getElementById('btn-join').onclick = async () => {
     if (!name) return alert('请输入昵称');
 
     try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        startSignaling(name);
-        joinView.classList.add('hidden');
-        roomView.classList.remove('hidden');
-        setupVAD(localStream, 'self');
+        const stream = isTestMode ? await createTestToneStream() : await navigator.mediaDevices.getUserMedia({ audio: true });
+        handleJoin(name, stream);
     } catch (e) {
         alert('无法访问麦克风: ' + e.message);
     }
@@ -48,6 +94,9 @@ document.getElementById('btn-leave').onclick = () => {
 };
 
 function leaveRoom() {
+    if (isLeaving) return;
+    isLeaving = true;
+    notifiedDisconnect = true;
     // 1. Close WebRTC
     if (pc) {
         pc.close();
@@ -63,27 +112,249 @@ function leaveRoom() {
         localStream.getTracks().forEach(track => track.stop());
         localStream = null;
     }
+    if (localRawStream) {
+        localRawStream.getTracks().forEach(track => track.stop());
+        localRawStream = null;
+    }
+    if (localAudioContext) {
+        localAudioContext.close();
+        localAudioContext = null;
+    }
+    if (remoteAudioContext) {
+        remoteAudioContext.close();
+        remoteAudioContext = null;
+    }
+    if (testToneContext) {
+        testToneContext.close();
+        testToneContext = null;
+    }
+    clearAllVAD();
+    if (vadAudioContext) {
+        vadAudioContext.close();
+        vadAudioContext = null;
+    }
+    pendingSelfVAD = null;
+    peers.forEach((_, id) => cleanupPeerAudio(id));
+    peers.clear();
+    setMixerOpen(false);
     
     // 4. Redirect to home
     window.location.href = '/';
 }
 
 document.getElementById('btn-mute').onclick = toggleMute;
+if (btnMixer) {
+    btnMixer.onclick = () => {
+        setMixerOpen(!mixerOpen);
+        resumeAudioContexts();
+    };
+}
+if (micGainInput) {
+    micGainInput.addEventListener('input', () => {
+        setMicGain(micGainInput.value);
+    });
+    setMicGain(micGainInput.value);
+}
 document.getElementById('btn-copy').onclick = () => {
     navigator.clipboard.writeText(window.location.href);
     alert('链接已复制到剪贴板');
 };
+
+function handleJoin(name, rawStream) {
+    localName = name;
+    isLeaving = false;
+    notifiedDisconnect = false;
+    localRawStream = rawStream;
+    localStream = setupLocalAudio(rawStream);
+    setMicGain(micGainInput?.value ?? 100);
+    resumeAudioContexts();
+
+    joinView.classList.add('hidden');
+    roomView.classList.remove('hidden');
+    if (isTestMode) {
+        myId = 'test-self';
+    }
+
+    queueSelfVAD(localStream, name);
+    setMixerOpen(!isMobilePortrait());
+
+    if (isTestMode) {
+        seedTestPeers();
+        return;
+    }
+
+    startSignaling(name);
+}
+
+function setupLocalAudio(rawStream) {
+    localAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const source = localAudioContext.createMediaStreamSource(rawStream);
+    localGainNode = localAudioContext.createGain();
+    localGainNode.gain.value = percentToGain(micGainInput?.value ?? 100);
+    const destination = localAudioContext.createMediaStreamDestination();
+    source.connect(localGainNode).connect(destination);
+    return destination.stream;
+}
+
+function createTestToneStream() {
+    testToneContext = new (window.AudioContext || window.webkitAudioContext)();
+    const oscillator = testToneContext.createOscillator();
+    const gain = testToneContext.createGain();
+    gain.gain.value = 0.0005;
+    const destination = testToneContext.createMediaStreamDestination();
+    oscillator.connect(gain).connect(destination);
+    oscillator.start();
+    return destination.stream;
+}
+
+function resumeAudioContexts() {
+    if (localAudioContext && localAudioContext.state === 'suspended') {
+        localAudioContext.resume();
+    }
+    if (remoteAudioContext && remoteAudioContext.state === 'suspended') {
+        remoteAudioContext.resume();
+    }
+    if (testToneContext && testToneContext.state === 'suspended') {
+        testToneContext.resume();
+    }
+    if (vadAudioContext && vadAudioContext.state === 'suspended') {
+        vadAudioContext.resume();
+    }
+}
+
+function getRemoteAudioContext() {
+    if (!remoteAudioContext) {
+        remoteAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    return remoteAudioContext;
+}
+
+function isMobilePortrait() {
+    return window.matchMedia('(max-width: 720px) and (orientation: portrait)').matches;
+}
+
+function setMixerOpen(open) {
+    mixerOpen = Boolean(open);
+    document.body.classList.toggle('mixer-open', mixerOpen);
+    btnMixer?.classList.toggle('active', mixerOpen);
+}
+
+function setMicGain(percent) {
+    const clamped = clampPercent(percent);
+    if (micGainInput) micGainInput.value = clamped;
+    if (micGainValue) micGainValue.textContent = `${clamped}%`;
+    if (localGainNode) {
+        localGainNode.gain.value = percentToGain(clamped);
+    }
+    if (audioDebug) {
+        audioDebug.micGain = percentToGain(clamped);
+    }
+}
+
+function getVADContext() {
+    if (!vadAudioContext) {
+        vadAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    return vadAudioContext;
+}
+
+function queueSelfVAD(stream, name) {
+    pendingSelfVAD = { stream, name };
+    maybeStartSelfVAD();
+}
+
+function maybeStartSelfVAD() {
+    if (!pendingSelfVAD || !myId) return;
+    const { stream, name } = pendingSelfVAD;
+    pendingSelfVAD = null;
+    setupVAD(stream, myId, name, true);
+}
+
+function getDisplayInitial(name) {
+    const trimmed = (name || '').trim();
+    if (!trimmed) return '?';
+    return Array.from(trimmed)[0].toUpperCase();
+}
+
+function ensureAvatar(id, name, isSelf) {
+    const existing = document.getElementById(`avatar-wrap-${id}`);
+    if (existing) {
+        const avatar = existing.querySelector('.avatar');
+        const label = existing.querySelector('.avatar-name');
+        if (avatar && name) {
+            avatar.textContent = getDisplayInitial(name);
+        }
+        if (label && name) {
+            label.textContent = isSelf ? `${name} (你)` : name;
+        }
+        return;
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'avatar-wrapper';
+    wrapper.id = `avatar-wrap-${id}`;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+    avatar.id = `avatar-${id}`;
+    avatar.textContent = getDisplayInitial(name);
+
+    const label = document.createElement('div');
+    label.className = 'avatar-name';
+    label.textContent = isSelf ? `${name} (你)` : name;
+
+    wrapper.append(avatar, label);
+    avatarGrid.appendChild(wrapper);
+}
+
+function cleanupVAD(peerId) {
+    const state = vadState.get(peerId);
+    if (!state) return;
+    if (state.rafId) {
+        cancelAnimationFrame(state.rafId);
+    }
+    if (state.source) state.source.disconnect();
+    if (state.analyser) state.analyser.disconnect();
+    vadState.delete(peerId);
+}
+
+function clearAllVAD() {
+    Array.from(vadState.keys()).forEach((peerId) => cleanupVAD(peerId));
+}
+
+function updatePeerVolumeEmptyState() {
+    if (!peerVolumeEmpty || !peerVolumeList) return;
+    peerVolumeEmpty.style.display = peerVolumeList.children.length === 0 ? 'block' : 'none';
+}
+
+function seedTestPeers() {
+    addPeer('peer-a', '测试A', false);
+    addPeer('peer-b', '测试B', false);
+    updatePeerVolumeEmptyState();
+}
 
 // 3. Signaling & WebRTC
 function startSignaling(name) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws?room=${roomUUID}&name=${encodeURIComponent(name)}`);
 
+    ws.onclose = () => {
+        if (!notifiedDisconnect) {
+            handleSocketFailure('连接已断开');
+        }
+    };
+    ws.onerror = () => {
+        if (!notifiedDisconnect) {
+            handleSocketFailure('连接失败');
+        }
+    };
+
     ws.onmessage = async (e) => {
         const msg = JSON.parse(e.data);
         switch (msg.type) {
             case 'room_state':
                 myId = msg.self_id;
+                maybeStartSelfVAD();
                 msg.peers.forEach(p => addPeer(p.id, p.name, false));
                 initWebRTC();
                 break;
@@ -94,27 +365,49 @@ function startSignaling(name) {
                 removePeer(msg.peer_id);
                 break;
             case 'offer':
-                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: msg.sdp }));
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
+                {
+                    const offer = new RTCSessionDescription({ type: 'offer', sdp: msg.sdp });
+                    const offerCollision = makingOffer || pc.signalingState !== 'stable';
+                    ignoreOffer = !isPolite && offerCollision;
+                    if (ignoreOffer) {
+                        return;
+                    }
+                    if (offerCollision) {
+                        await pc.setLocalDescription({ type: 'rollback' });
+                    }
+                    await pc.setRemoteDescription(offer);
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
+                }
                 break;
             case 'answer':
+                if (ignoreOffer) {
+                    return;
+                }
                 await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
                 break;
             case 'candidate':
                 await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
                 break;
             case 'error':
-                alert(msg.message);
-                location.href = '/';
+                handleSocketFailure(msg.message || '连接已断开');
                 break;
         }
     };
 }
 
+function handleSocketFailure(message) {
+    if (notifiedDisconnect) return;
+    notifiedDisconnect = true;
+    alert(message);
+    leaveRoom();
+}
+
 function initWebRTC() {
     pc = new RTCPeerConnection(config);
+    makingOffer = false;
+    ignoreOffer = false;
     
     localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
@@ -126,8 +419,8 @@ function initWebRTC() {
 
     pc.ontrack = (e) => {
         const stream = e.streams[0];
-        const peerId = stream.id; // StreamID is now forced to be PeerID by the server
-        
+        const peerId = stream.id || e.track.id; // StreamID is now forced to be PeerID by the server
+
         // Create audio element
         let audio = document.getElementById('audio-' + peerId);
         if (!audio) {
@@ -138,46 +431,57 @@ function initWebRTC() {
             audioContainer.appendChild(audio);
         }
         audio.srcObject = stream;
-        
+        attachRemoteAudio(peerId, audio);
+        resumeAudioContexts();
+
         setupVAD(stream, peerId);
     };
 
     pc.onnegotiationneeded = async () => {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+        try {
+            makingOffer = true;
+            if (pc.signalingState !== 'stable') {
+                return;
+            }
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+            }
+        } finally {
+            makingOffer = false;
+        }
     };
 }
 
 // 4. UI Helpers
 function addPeer(id, name, animate) {
     if (id === myId || peers.has(id)) return;
+    const safeName = (name || '').trim() || '匿名';
 
     // Sidebar item
     const item = document.createElement('div');
     item.className = 'user-item active';
     item.id = `user-${id}`;
-    item.innerText = name;
+    item.textContent = safeName;
     userList.appendChild(item);
 
-    // Avatar grid item
-    const wrapper = document.createElement('div');
-    wrapper.className = 'avatar-wrapper';
-    wrapper.id = `avatar-wrap-${id}`;
-    wrapper.innerHTML = `
-        <div class="avatar" id="avatar-${id}">${name[0].toUpperCase()}</div>
-        <div class="avatar-name">${name}</div>
-    `;
-    avatarGrid.appendChild(wrapper);
+    ensureAvatar(id, safeName, false);
 
-    peers.set(id, { name });
+    peers.set(id, { name: safeName, volumePercent: 100 });
+    addPeerVolumeControl(id, safeName);
+    updatePeerVolumeEmptyState();
 }
 
 function removePeer(id) {
     document.getElementById(`user-${id}`)?.remove();
     document.getElementById(`avatar-wrap-${id}`)?.remove();
     document.getElementById(`audio-${id}`)?.remove();
+    removePeerVolumeControl(id);
+    cleanupVAD(id);
+    cleanupPeerAudio(id);
     peers.delete(id);
+    updatePeerVolumeEmptyState();
 }
 
 const ICONS = {
@@ -187,6 +491,7 @@ const ICONS = {
 
 function toggleMute() {
     isMuted = !isMuted;
+    if (!localStream) return;
     const tracks = localStream.getAudioTracks();
     if (tracks.length > 0) {
         tracks[0].enabled = !isMuted;
@@ -201,62 +506,154 @@ function toggleMute() {
     document.getElementById(`avatar-${myId}`)?.classList.toggle('muted', isMuted);
 }
 
-function setupVAD(stream, peerId) {
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+function addPeerVolumeControl(peerId, name) {
+    if (!peerVolumeList) return;
+    if (document.getElementById(`peer-volume-${peerId}`)) return;
+
+    const row = document.createElement('div');
+    row.className = 'mixer-row';
+    row.id = `peer-volume-${peerId}`;
+
+    const label = document.createElement('span');
+    label.className = 'mixer-label';
+    label.textContent = name;
+
+    const slider = document.createElement('input');
+    slider.className = 'mixer-slider';
+    slider.type = 'range';
+    slider.min = '0';
+    slider.max = String(MAX_PERCENT);
+    slider.value = '100';
+    slider.step = '1';
+    slider.setAttribute('data-peer-id', peerId);
+    slider.setAttribute('aria-label', `${name} 音量`);
+
+    const value = document.createElement('span');
+    value.className = 'mixer-value';
+    value.textContent = '100%';
+
+    slider.addEventListener('input', () => {
+        setPeerVolume(peerId, slider.value, value);
+    });
+
+    row.append(label, slider, value);
+    peerVolumeList.appendChild(row);
+    setPeerVolume(peerId, slider.value, value);
+}
+
+function removePeerVolumeControl(peerId) {
+    document.getElementById(`peer-volume-${peerId}`)?.remove();
+    if (audioDebug && audioDebug.peerGains) {
+        delete audioDebug.peerGains[peerId];
+    }
+}
+
+function setPeerVolume(peerId, percent, valueEl) {
+    const clamped = clampPercent(percent);
+    if (valueEl) valueEl.textContent = `${clamped}%`;
+    const peer = peers.get(peerId);
+    if (peer) {
+        peer.volumePercent = clamped;
+        if (peer.gainNode) {
+            peer.gainNode.gain.value = percentToGain(clamped);
+        }
+    }
+    if (audioDebug) {
+        audioDebug.peerGains[peerId] = percentToGain(clamped);
+    }
+}
+
+function attachRemoteAudio(peerId, audioEl) {
+    let peer = peers.get(peerId);
+    if (!peer) {
+        peer = { name: peerId, volumePercent: 100 };
+        peers.set(peerId, peer);
+        addPeerVolumeControl(peerId, peerId);
+        updatePeerVolumeEmptyState();
+    }
+
+    peer.audioEl = audioEl;
+    if (peer.sourceNode || peer.gainNode) {
+        return;
+    }
+
+    const ctx = getRemoteAudioContext();
+    const source = ctx.createMediaElementSource(audioEl);
+    const gainNode = ctx.createGain();
+    const percent = peer.volumePercent ?? 100;
+    gainNode.gain.value = percentToGain(percent);
+    source.connect(gainNode).connect(ctx.destination);
+
+    peer.sourceNode = source;
+    peer.gainNode = gainNode;
+
+    if (audioDebug) {
+        audioDebug.peerGains[peerId] = gainNode.gain.value;
+    }
+}
+
+function cleanupPeerAudio(peerId) {
+    const peer = peers.get(peerId);
+    if (!peer) return;
+    if (peer.sourceNode) peer.sourceNode.disconnect();
+    if (peer.gainNode) peer.gainNode.disconnect();
+    if (peer.audioEl) peer.audioEl.srcObject = null;
+    peer.sourceNode = null;
+    peer.gainNode = null;
+    peer.audioEl = null;
+}
+
+function setupVAD(stream, peerId, displayName, isSelf) {
+    const name = displayName || peers.get(peerId)?.name || peerId || '匿名';
+    ensureAvatar(peerId, name, Boolean(isSelf));
+    cleanupVAD(peerId);
+
+    const audioContext = getVADContext();
+    if (audioContext.state === 'suspended') {
+        audioContext.resume();
+    }
     const source = audioContext.createMediaStreamSource(stream);
     const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 256; 
+    analyser.fftSize = 256;
     source.connect(analyser);
 
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
-    
-    // Create self avatar if not exists
-    if (peerId === 'self') {
-        peerId = myId; 
-        if (!document.getElementById(`avatar-${peerId}`)) {
-             const name = document.getElementById('nickname').value;
-             const wrapper = document.createElement('div');
-             wrapper.className = 'avatar-wrapper';
-             wrapper.innerHTML = `
-                <div class="avatar" id="avatar-${peerId}">${name[0].toUpperCase()}</div>
-                <div class="avatar-name">${name} (你)</div>
-            `;
-            avatarGrid.appendChild(wrapper);
-        }
-    }
+
+    const state = { source, analyser, rafId: 0 };
+    vadState.set(peerId, state);
 
     function check() {
-        if (!peers.has(peerId) && peerId !== myId) {
-             // If peer avatar is gone, stop checking
-            if(!document.getElementById(`avatar-${peerId}`)) {
-                // Ideally close AudioContext here, but for simplicity we just stop the loop
-                return;
-            }
+        if (!vadState.has(peerId)) {
+            return;
+        }
+
+        const avatar = document.getElementById(`avatar-${peerId}`);
+        if (!avatar) {
+            cleanupVAD(peerId);
+            return;
         }
 
         analyser.getByteFrequencyData(dataArray);
         let sum = 0;
         for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
         const average = sum / bufferLength;
-        
-        const avatar = document.getElementById(`avatar-${peerId}`);
-        if (avatar) {
-            // Threshold 10 filters minimal background noise
-            if (average > 10) {
-                avatar.classList.add('speaking');
-                // Dynamic effect: Scale 1.0 -> 1.2
-                const scale = 1 + Math.min((average - 10) / 100, 0.2);
-                avatar.style.transform = `scale(${scale})`;
-                // Dynamic shadow opacity/size
-                avatar.style.boxShadow = `0 0 0 ${4 + (average/8)}px rgba(59, 165, 93, 0.6)`;
-            } else {
-                avatar.classList.remove('speaking');
-                avatar.style.transform = 'scale(1)';
-                avatar.style.boxShadow = 'none';
-            }
+
+        // Threshold 10 filters minimal background noise
+        if (average > 10) {
+            avatar.classList.add('speaking');
+            // Dynamic effect: Scale 1.0 -> 1.2
+            const scale = 1 + Math.min((average - 10) / 100, 0.2);
+            avatar.style.transform = `scale(${scale})`;
+            // Dynamic shadow opacity/size
+            avatar.style.boxShadow = `0 0 0 ${4 + (average / 8)}px rgba(59, 165, 93, 0.6)`;
+        } else {
+            avatar.classList.remove('speaking');
+            avatar.style.transform = 'scale(1)';
+            avatar.style.boxShadow = 'none';
         }
-        requestAnimationFrame(check);
+
+        state.rafId = requestAnimationFrame(check);
     }
 
     check();
