@@ -21,7 +21,7 @@ A lightweight, anonymous, web-based voice chat application designed for gaming. 
 
 ### 2.2 Network Flow
 1.  **Signaling (TCP/WSS):**
-    *   User -> Nginx (Port 443) -> Reverse Proxy -> Go App (Port 8080/Localhost).
+    *   User -> Caddy (TLS) -> Go App (Port 8080/Localhost).
     *   Handles: Room joining, SDP exchange (Offer/Answer), ICE Candidate exchange.
 2.  **Media (UDP/RTP):**
     *   User -> Go App (Port 50000 UDP).
@@ -31,13 +31,13 @@ A lightweight, anonymous, web-based voice chat application designed for gaming. 
 ## 3. Business Logic & Lifecycle
 
 ### 3.1 Room Management (The "Implicit" Model)
-*   **Identification:** Rooms are identified by a UUID string in the URL (e.g., `domain.com/room/123e4567-e89b...`).
+*   **Identification:** Rooms are identified by the path `/r/{room-id}` (e.g., `domain.com/r/abc123xyz`).
 *   **Creation:**
     *   When a user connects via WebSocket to a UUID:
     *   **If Room exists:** Join immediately.
-    *   **If Room does not exist:** Check if UUID format is valid. If yes, **Create Room** in RAM immediately.
+*   **If Room does not exist:** **Create Room** in RAM immediately.
 *   **Constraints:**
-    *   **Max Capacity:** 8 Users per room. If full, reject connection with specific error code.
+*   **Max Capacity:** 10 users per room. If full, reject connection with an error message.
 *   **Destruction (Cleanup):**
     *   A background `Ticker` runs every 1 minute.
     *   Check each room: `if Room.PeerCount == 0` AND `time.Since(Room.LastEmptyTime) > 2 hours`, then `delete(RoomMap, uuid)`.
@@ -103,20 +103,26 @@ var BannedIPs = make(map[string]time.Time) // Loaded from/Saved to disk
 1.  **Signal (SDP/ICE):**
     ```json
     { "type": "offer", "sdp": "..." }
-    { "type": "candidate", "candidate": "..." }
+    { "type": "answer", "sdp": "..." }
+    { "type": "candidate", "candidate": { "candidate": "...", "sdpMid": "0", "sdpMLineIndex": 0 } }
     ```
-2.  **Room State (Sent to client on join/change):**
+2.  **Room State (Initial):**
     ```json
     {
-      "type": "state",
-      "peers": [
-        { "id": "xyz", "name": "Tan", "speaking": false, "muted": false }
-      ]
+      "type": "room_state",
+      "self_id": "abc",
+      "peers": [{ "id": "xyz", "name": "Tan" }]
     }
     ```
-3.  **Audio Level (For UI "Green Ring" effect):**
-    *   Server analyzes audio packets (VAD - Voice Activity Detection) roughly or Client sends `speaking` events.
-    *   *Optimization:* Client-side `AudioContext` detects volume and sends `{ "type": "speaking", "active": true }` to server, server broadcasts to room.
+3.  **Peer Join/Leave:**
+    ```json
+    { "type": "peer_join", "peer": { "id": "xyz", "name": "Tan" } }
+    { "type": "peer_leave", "peer_id": "xyz" }
+    ```
+4.  **Error:**
+    ```json
+    { "type": "error", "message": "Room full" }
+    ```
 
 ## 6. Admin Panel
 
@@ -132,13 +138,12 @@ var BannedIPs = make(map[string]time.Time) // Loaded from/Saved to disk
     *   Parses JSON and renders a table (Time | IP | Event | Detail).
 3.  **Action Menu:**
     *   "Ban IP" button next to logs.
-    *   "Kick User" (Forces WebSocket close).
 
 ## 7. Frontend Design (UI/UX)
 
 **Aesthetic:** "Discord-Dark"
 *   **Colors:** Dark Gray (`#36393f`), Darker Gray (`#2f3136`), Accent Blurple (`#5865F2`), Success Green (`#43b581`).
-*   **Font:** Inter or Roboto (System sans-serif).
+*   **Font:** PingFang SC / Microsoft YaHei (system sans-serif).
 
 **Views:**
 
@@ -155,12 +160,12 @@ var BannedIPs = make(map[string]time.Time) // Loaded from/Saved to disk
         *   **Muted:** Red microphone icon overlay.
     *   **Bottom Bar:**
         *   Microphone Toggle (Mute/Unmute).
+        *   Mixer toggle for mic gain and per-member volume.
         *   "Disconnect" button (Red).
         *   "Copy Invite Link" button.
 
 **Feedback Mechanism:**
-*   Toast notifications for "User Joined", "User Left".
-*   Visualizer: Simple CSS animation inside the avatar when audio is detected.
+*   Client-side VAD highlights avatars when speaking.
 
 ## 8. Implementation Steps (For AI Developer)
 

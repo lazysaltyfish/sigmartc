@@ -55,6 +55,9 @@ cd "$ROOT_DIR"
 tar \
   --exclude .git \
   --exclude bin \
+  --exclude node_modules \
+  --exclude test-results \
+  --exclude playwright-report \
   --exclude server.log \
   --exclude banned_ips.json \
   --exclude task_plan.md \

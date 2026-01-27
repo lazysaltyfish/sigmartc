@@ -55,7 +55,7 @@ Admin panel: `/admin?key=<admin-key>`
 Actions:
 - `action=stats` for JSON stats
 - `action=logs` for recent logs
-- `action=ban&ip=<ip>` to ban an IP
+- `action=ban&ip=<ip>` to ban an IP (POST only)
 
 ## Configuration
 

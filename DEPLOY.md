@@ -38,6 +38,8 @@ Environment variables used by the script:
 WebRTC ICE is bound to a single UDP port (default `50000`). Make sure UDP `50000` is open in your firewall.
 When using `NETWORK_MODE=host`, Docker cannot bind HTTP to `127.0.0.1`; use `bridge` if you need localhost-only HTTP.
 
+If you run behind Caddy, keep the app bound to localhost or a private network so `X-Forwarded-For` can only come from the proxy.
+
 ## Local Docker build/run
 
 ```bash
@@ -69,6 +71,7 @@ docker run -d --name sigmartc \
   -e RTC_UDP_PORT=50000 \
   -v sigmartc_data:/data \
   sigmartc
+```
 
 All-interfaces HTTP:
 
@@ -82,5 +85,4 @@ docker run -d --name sigmartc \
   -e RTC_UDP_PORT=50000 \
   -v sigmartc_data:/data \
   sigmartc
-```
 ```

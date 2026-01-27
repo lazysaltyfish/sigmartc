@@ -49,7 +49,7 @@
 
 ### 3.3 Room Lifecycle
 *   **Creation:** Implicit. If a user connects to `/r/{uuid}` and it doesn't exist, it is created in RAM.
-*   **Capacity:** Max **8 users** per room (Hardcoded check in `HandleWS`).
+*   **Capacity:** Max **10 users** per room (Hardcoded check in `HandleWS`).
 *   **Destruction:** A background ticker runs every 1 minute. If a room has 0 peers for > 2 hours, it is deleted.
 
 ## 4. Development & Operation
@@ -68,7 +68,7 @@ go build -o bin/sigmartc cmd/server/main.go
 *   **Features:**
     *   `action=stats`: JSON stats (Room count, Memory usage).
     *   `action=logs`: View last 100 lines of `server.log`.
-    *   `action=ban&ip={ip}`: Ban an IP address (Persisted to `banned_ips.json`).
+    *   `action=ban&ip={ip}`: Ban an IP address (POST only, persisted to `banned_ips.json`).
 
 ### 4.3 Directory Structure
 ```
