@@ -19,6 +19,9 @@ banned_ips.json
 
 # Local tooling artifacts
 .sisyphus/
+node_modules/
+test-results/
+playwright-report/
 
 # Editor/OS
 .DS_Store

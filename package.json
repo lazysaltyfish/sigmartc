@@ -1,0 +1,12 @@
+{
+    "name": "sigmartc-ui-tests",
+    "private": true,
+    "devDependencies": {
+        "@playwright/test": "^1.49.0"
+    },
+    "scripts": {
+        "test:unit": "node --test tests/unit/audio_controls.test.cjs",
+        "test:ui": "playwright test",
+        "test": "npm run test:unit && npm run test:ui"
+    }
+}
