@@ -149,6 +149,13 @@ if (btnMixer) {
         resumeAudioContexts();
     };
 }
+document.addEventListener('pointerdown', (event) => {
+    if (!mixerOpen) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest('#mixer-panel') || target.closest('#btn-mixer')) return;
+    setMixerOpen(false);
+});
 if (micGainInput) {
     micGainInput.addEventListener('input', () => {
         setMicGain(micGainInput.value);
@@ -177,6 +184,7 @@ function handleJoin(name, rawStream) {
 
     queueSelfVAD(localStream, name);
     setMixerOpen(!isMobilePortrait());
+    syncMixerForViewport();
 
     if (isTestMode) {
         seedTestPeers();
@@ -185,6 +193,12 @@ function handleJoin(name, rawStream) {
 
     startSignaling(name);
 }
+
+window.addEventListener('resize', () => {
+    if (!roomView.classList.contains('hidden')) {
+        syncMixerForViewport();
+    }
+});
 
 function setupLocalAudio(rawStream) {
     localAudioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -230,13 +244,22 @@ function getRemoteAudioContext() {
 }
 
 function isMobilePortrait() {
-    return window.matchMedia('(max-width: 720px) and (orientation: portrait)').matches;
+    const portraitQuery = window.matchMedia('(max-width: 720px) and (orientation: portrait)');
+    if (portraitQuery.matches) return true;
+    const narrowQuery = window.matchMedia('(max-width: 720px)');
+    return narrowQuery.matches && window.innerHeight >= window.innerWidth;
 }
 
 function setMixerOpen(open) {
     mixerOpen = Boolean(open);
     document.body.classList.toggle('mixer-open', mixerOpen);
     btnMixer?.classList.toggle('active', mixerOpen);
+}
+
+function syncMixerForViewport() {
+    if (isMobilePortrait()) {
+        if (mixerOpen) setMixerOpen(false);
+    }
 }
 
 function setMicGain(percent) {

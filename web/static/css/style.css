@@ -292,6 +292,7 @@ input:focus-visible,
 @media (max-width: 720px) and (orientation: portrait) {
     body {
         height: 100svh;
+        --controls-height: calc(70px + env(safe-area-inset-bottom));
     }
 
     #join-view {
@@ -347,7 +348,7 @@ input:focus-visible,
 
     .main-stage {
         padding: 12px;
-        padding-bottom: 92px;
+        padding-bottom: calc(16px + var(--controls-height));
     }
 
     .stage-content {
@@ -358,12 +359,12 @@ input:focus-visible,
         position: fixed;
         left: 0;
         right: 0;
-        bottom: 0;
+        bottom: var(--controls-height);
         z-index: 11;
         max-height: 70vh;
         border-radius: 16px 16px 0 0;
-        padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
-        transform: translateY(110%);
+        padding: 16px;
+        transform: translateY(calc(110% + var(--controls-height)));
         transition: transform 0.2s ease;
     }
 
@@ -393,6 +394,10 @@ input:focus-visible,
 }
 
 @media (max-width: 480px) and (orientation: portrait) {
+    body {
+        --controls-height: calc(66px + env(safe-area-inset-bottom));
+    }
+
     .card {
         padding: 24px;
     }
