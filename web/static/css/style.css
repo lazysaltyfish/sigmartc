@@ -203,3 +203,116 @@ button:hover { filter: brightness(1.2); }
 
 #btn-copy { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
 #btn-copy:hover { background: var(--accent); color: #fff; }
+
+@media (max-width: 720px) and (orientation: portrait) {
+    body {
+        height: 100svh;
+    }
+
+    #join-view {
+        padding: 24px 16px;
+    }
+
+    .card {
+        width: min(320px, 88vw);
+        padding: 28px;
+    }
+
+    #room-view {
+        flex-direction: column;
+    }
+
+    .sidebar {
+        width: 100%;
+        flex: 0 0 auto;
+        border-bottom: 1px solid rgba(0,0,0,0.35);
+    }
+
+    .room-header {
+        padding: 12px 16px;
+    }
+
+    .user-list {
+        display: flex;
+        flex-direction: row;
+        gap: 8px;
+        padding: 8px 12px 12px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: thin;
+    }
+
+    .user-item {
+        margin-bottom: 0;
+        padding: 6px 10px;
+        white-space: nowrap;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.04);
+    }
+
+    .controls {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 10;
+        padding: 10px 16px calc(12px + env(safe-area-inset-bottom));
+        border-top: 1px solid rgba(0,0,0,0.4);
+    }
+
+    .main-stage {
+        padding: 12px;
+        padding-bottom: 92px;
+    }
+
+    .avatar-grid {
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        gap: 12px;
+        align-content: start;
+    }
+
+    .avatar {
+        width: 80px;
+        height: 80px;
+        font-size: 32px;
+    }
+
+    .footer {
+        padding: 12px 0 0;
+    }
+
+    #btn-copy {
+        width: 100%;
+    }
+}
+
+@media (max-width: 480px) and (orientation: portrait) {
+    .card {
+        padding: 24px;
+    }
+
+    .input-group {
+        margin-top: 20px;
+        gap: 12px;
+    }
+
+    .controls {
+        padding-left: 12px;
+        padding-right: 12px;
+    }
+
+    .control-btn {
+        width: 44px;
+        height: 44px;
+    }
+
+    .avatar-grid {
+        grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    }
+
+    .avatar {
+        width: 72px;
+        height: 72px;
+        font-size: 28px;
+    }
+}
