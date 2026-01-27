@@ -246,10 +246,29 @@ input:focus-visible,
     align-items: center;
 }
 
+.mixer-row-select {
+    grid-template-columns: auto 1fr;
+}
+
 .mixer-label {
     color: var(--text-muted);
     font-size: 0.85em;
     min-width: 28px;
+}
+
+.mixer-select {
+    background: var(--bg-darker);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 0.9em;
+    outline: none;
+}
+
+.mixer-select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
 }
 
 .mixer-slider {
@@ -279,6 +298,11 @@ input:focus-visible,
 .mixer-empty {
     color: var(--text-muted);
     font-size: 0.85em;
+}
+
+.mixer-help {
+    color: var(--text-muted);
+    font-size: 0.78em;
 }
 
 .footer {

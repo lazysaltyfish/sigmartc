@@ -25,6 +25,46 @@ const audioControls = window.AudioControls || {
 
 const { MAX_PERCENT, clampPercent, percentToGain } = audioControls;
 const isTestMode = Boolean(window.__TEST__);
+const SFX_FILES = {
+    join: '/static/audio/join.wav',
+    leave: '/static/audio/leave.wav'
+};
+const SFX_VOLUME = 0.35;
+const sfxBank = new Map();
+let sfxPrimed = false;
+const supportsContextSink = Boolean(window.AudioContext && typeof AudioContext.prototype.setSinkId === 'function');
+const supportsElementSink = Boolean(window.HTMLMediaElement && typeof HTMLMediaElement.prototype.setSinkId === 'function');
+let preferredOutputDeviceId = 'default';
+
+function primeSfx() {
+    if (sfxPrimed || typeof Audio !== 'function') return;
+    sfxPrimed = true;
+    Object.entries(SFX_FILES).forEach(([key, url]) => {
+        const audio = new Audio(url);
+        audio.preload = 'auto';
+        audio.volume = SFX_VOLUME;
+        sfxBank.set(key, audio);
+    });
+}
+
+function playSfx(key) {
+    if (isTestMode) return;
+    primeSfx();
+    const base = sfxBank.get(key);
+    if (!base) return;
+    const clip = base.cloneNode();
+    clip.volume = SFX_VOLUME;
+    if (supportsElementSink && preferredOutputDeviceId) {
+        const sinkPromise = clip.setSinkId(preferredOutputDeviceId);
+        if (sinkPromise && typeof sinkPromise.catch === 'function') {
+            sinkPromise.catch(() => {});
+        }
+    }
+    const playPromise = clip.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(() => {});
+    }
+}
 const audioDebug = isTestMode ? { micGain: 1, peerGains: {} } : null;
 if (audioDebug) {
     window.__audioDebug = audioDebug;
@@ -60,6 +100,8 @@ const audioContainer = document.getElementById('audio-container');
 const mixerPanel = document.getElementById('mixer-panel');
 const micGainInput = document.getElementById('mic-gain');
 const micGainValue = document.getElementById('mic-gain-value');
+const playbackDeviceSelect = document.getElementById('playback-device');
+const playbackHelp = document.getElementById('playback-help');
 const peerVolumeList = document.getElementById('peer-volume-list');
 const peerVolumeEmpty = document.getElementById('peer-volume-empty');
 const btnMixer = document.getElementById('btn-mixer');
@@ -78,6 +120,7 @@ document.getElementById('display-room-id').innerText = `房间: ${roomUUID}`;
 document.getElementById('btn-join').onclick = async () => {
     const name = document.getElementById('nickname').value.trim();
     if (!name) return alert('请输入昵称');
+    primeSfx();
 
     try {
         const stream = isTestMode ? await createTestToneStream() : await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -167,6 +210,8 @@ document.getElementById('btn-copy').onclick = () => {
     alert('链接已复制到剪贴板');
 };
 
+initPlaybackDevices();
+
 function handleJoin(name, rawStream) {
     localName = name;
     isLeaving = false;
@@ -174,7 +219,9 @@ function handleJoin(name, rawStream) {
     localRawStream = rawStream;
     localStream = setupLocalAudio(rawStream);
     setMicGain(micGainInput?.value ?? 100);
+    getRemoteAudioContext();
     resumeAudioContexts();
+    refreshPlaybackDevices();
 
     joinView.classList.add('hidden');
     roomView.classList.remove('hidden');
@@ -236,9 +283,109 @@ function resumeAudioContexts() {
     }
 }
 
+function setPlaybackHelp(message) {
+    if (!playbackHelp) return;
+    playbackHelp.textContent = message || '';
+    playbackHelp.style.display = message ? 'block' : 'none';
+}
+
+function loadPreferredPlaybackDevice() {
+    try {
+        const stored = localStorage.getItem('playbackDeviceId');
+        if (stored) preferredOutputDeviceId = stored;
+    } catch (e) {
+        // Ignore storage access issues.
+    }
+}
+
+function persistPreferredPlaybackDevice() {
+    try {
+        localStorage.setItem('playbackDeviceId', preferredOutputDeviceId);
+    } catch (e) {
+        // Ignore storage access issues.
+    }
+}
+
+function applyOutputDeviceToContext(deviceId) {
+    if (!supportsContextSink || !remoteAudioContext || !deviceId) return;
+    remoteAudioContext.setSinkId(deviceId).then(() => {
+        setPlaybackHelp('');
+    }).catch(() => {
+        setPlaybackHelp('无法切换播放设备，请检查权限或设备状态');
+    });
+}
+
+function setPreferredPlaybackDevice(deviceId) {
+    if (!deviceId) return;
+    preferredOutputDeviceId = deviceId;
+    persistPreferredPlaybackDevice();
+    applyOutputDeviceToContext(deviceId);
+}
+
+async function refreshPlaybackDevices() {
+    if (!playbackDeviceSelect) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        playbackDeviceSelect.disabled = true;
+        setPlaybackHelp('当前浏览器不支持枚举播放设备');
+        return;
+    }
+    let devices = [];
+    try {
+        devices = await navigator.mediaDevices.enumerateDevices();
+    } catch (e) {
+        playbackDeviceSelect.disabled = true;
+        setPlaybackHelp('无法读取播放设备');
+        return;
+    }
+    const outputs = devices.filter((device) => device.kind === 'audiooutput');
+    playbackDeviceSelect.innerHTML = '';
+    if (outputs.length === 0) {
+        playbackDeviceSelect.disabled = true;
+        setPlaybackHelp('未检测到播放设备');
+        return;
+    }
+
+    outputs.forEach((device, index) => {
+        const option = document.createElement('option');
+        option.value = device.deviceId || 'default';
+        option.textContent = device.label || `播放设备 ${index + 1}`;
+        playbackDeviceSelect.appendChild(option);
+    });
+
+    if (!supportsContextSink) {
+        playbackDeviceSelect.disabled = true;
+        setPlaybackHelp('当前浏览器不支持切换播放设备');
+        return;
+    }
+
+    playbackDeviceSelect.disabled = false;
+    setPlaybackHelp('');
+
+    let nextId = preferredOutputDeviceId;
+    if (!outputs.some((device) => device.deviceId === nextId)) {
+        const defaultDevice = outputs.find((device) => device.deviceId === 'default');
+        nextId = defaultDevice?.deviceId || outputs[0].deviceId;
+    }
+    playbackDeviceSelect.value = nextId;
+    setPreferredPlaybackDevice(nextId);
+}
+
+function initPlaybackDevices() {
+    if (!playbackDeviceSelect) return;
+    loadPreferredPlaybackDevice();
+    playbackDeviceSelect.addEventListener('change', () => {
+        setPreferredPlaybackDevice(playbackDeviceSelect.value);
+    });
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+        navigator.mediaDevices.addEventListener('devicechange', refreshPlaybackDevices);
+    }
+    refreshPlaybackDevices();
+}
+
 function getRemoteAudioContext() {
     if (!remoteAudioContext) {
         remoteAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+        applyOutputDeviceToContext(preferredOutputDeviceId);
     }
     return remoteAudioContext;
 }
@@ -454,6 +601,10 @@ function initWebRTC() {
             audioContainer.appendChild(audio);
         }
         audio.srcObject = stream;
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+            playPromise.catch(() => {});
+        }
         attachRemoteAudio(peerId, audio);
         resumeAudioContexts();
 
@@ -494,9 +645,13 @@ function addPeer(id, name, animate) {
     peers.set(id, { name: safeName, volumePercent: 100 });
     addPeerVolumeControl(id, safeName);
     updatePeerVolumeEmptyState();
+    if (animate) {
+        playSfx('join');
+    }
 }
 
 function removePeer(id) {
+    const hadPeer = peers.has(id);
     document.getElementById(`user-${id}`)?.remove();
     document.getElementById(`avatar-wrap-${id}`)?.remove();
     document.getElementById(`audio-${id}`)?.remove();
@@ -505,6 +660,9 @@ function removePeer(id) {
     cleanupPeerAudio(id);
     peers.delete(id);
     updatePeerVolumeEmptyState();
+    if (hadPeer) {
+        playSfx('leave');
+    }
 }
 
 const ICONS = {

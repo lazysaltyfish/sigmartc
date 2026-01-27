@@ -88,3 +88,7 @@ In Docker, these live under the `/data` volume.
 - If audio fails, confirm microphone permissions and UDP `50000` access.
 - If running behind a reverse proxy, ensure WebSocket upgrade headers and
   a trusted `X-Forwarded-For` are configured.
+
+## Third-Party Assets
+
+- UI sound effects (join/leave): Kenney "Interface Sounds" (CC0). See `web/static/audio/LICENSE-kenney-interface-sounds.txt`.

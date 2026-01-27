@@ -166,6 +166,7 @@ var BannedIPs = make(map[string]time.Time) // Loaded from/Saved to disk
 
 **Feedback Mechanism:**
 *   Client-side VAD highlights avatars when speaking.
+*   Short join/leave sound cues confirm room membership changes.
 
 ## 8. Implementation Steps (For AI Developer)
 
