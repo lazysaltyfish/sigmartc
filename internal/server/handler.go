@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -285,7 +286,8 @@ func (h *Handler) subscribeToForwarder(receiver *Peer, senderID string, forwarde
 
 	// Create a local track to push data to the receiver
 	// Use senderID as the StreamID so the client can map it to a user
-	localTrack, err := webrtc.NewTrackLocalStaticRTP(track.Codec().RTPCodecCapability, track.ID(), senderID)
+	trackID := fmt.Sprintf("%s-audio", senderID)
+	localTrack, err := webrtc.NewTrackLocalStaticRTP(track.Codec().RTPCodecCapability, trackID, senderID)
 	if err != nil {
 		slog.Error("Failed to create local track", "err", err)
 		return
