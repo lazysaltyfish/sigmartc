@@ -95,6 +95,21 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Cleanup on exit
 	defer func() {
+		// Unsubscribe this peer from all forwarders (so they stop sending to this peer)
+		room.ForwardersMu.RLock()
+		for _, forwarder := range room.Forwarders {
+			forwarder.Unsubscribe(peerID)
+		}
+		room.ForwardersMu.RUnlock()
+
+		// Stop and remove this peer's own forwarder if they were sending audio
+		room.ForwardersMu.Lock()
+		if forwarder, exists := room.Forwarders[peerID]; exists {
+			forwarder.Stop()
+			delete(room.Forwarders, peerID)
+		}
+		room.ForwardersMu.Unlock()
+
 		room.Lock.Lock()
 		delete(room.Peers, peerID)
 		if len(room.Peers) == 0 {
@@ -223,11 +238,19 @@ func (h *Handler) addExistingTracks(room *Room, receiver *Peer) {
 	room.Lock.RUnlock()
 
 	for _, t := range tracks {
-		h.addTrackToPeer(receiver, t.senderID, t.track)
+		h.addTrackToPeer(receiver, t.senderID, t.track, room)
 	}
 }
 
 func (h *Handler) broadcastTrack(room *Room, sender *Peer, track *webrtc.TrackRemote) {
+	// Create a forwarder for this sender's track
+	forwarder := NewTrackForwarder(sender.ID, track)
+
+	room.ForwardersMu.Lock()
+	room.Forwarders[sender.ID] = forwarder
+	room.ForwardersMu.Unlock()
+
+	// Add the track to all existing peers in the room
 	room.Lock.RLock()
 	receivers := make([]*Peer, 0, len(room.Peers))
 	for _, receiver := range room.Peers {
@@ -239,11 +262,20 @@ func (h *Handler) broadcastTrack(room *Room, sender *Peer, track *webrtc.TrackRe
 	room.Lock.RUnlock()
 
 	for _, receiver := range receivers {
-		h.addTrackToPeer(receiver, sender.ID, track)
+		h.subscribeToForwarder(receiver, sender.ID, forwarder, track)
 	}
+
+	// Wait for negotiation to stabilize before starting the forwarder
+	// This is done in a goroutine to not block the OnTrack callback
+	go func() {
+		// Give time for all receivers to set up their tracks
+		time.Sleep(100 * time.Millisecond)
+		forwarder.Start()
+	}()
 }
 
-func (h *Handler) addTrackToPeer(receiver *Peer, senderID string, track *webrtc.TrackRemote) {
+// subscribeToForwarder creates a local track for the receiver and subscribes it to the forwarder.
+func (h *Handler) subscribeToForwarder(receiver *Peer, senderID string, forwarder *TrackForwarder, track *webrtc.TrackRemote) {
 	if receiver.PC == nil {
 		return
 	}
@@ -262,25 +294,35 @@ func (h *Handler) addTrackToPeer(receiver *Peer, senderID string, track *webrtc.
 		return
 	}
 
+	// Store the outgoing track for this receiver
+	receiver.OutTracksMu.Lock()
+	if receiver.OutTracks == nil {
+		receiver.OutTracks = make(map[string]*webrtc.TrackLocalStaticRTP)
+	}
+	receiver.OutTracks[senderID] = localTrack
+	receiver.OutTracksMu.Unlock()
+
+	// Subscribe to the forwarder
+	forwarder.Subscribe(receiver.ID, localTrack)
+
 	// Trigger renegotiation
 	h.sendNegotiationNeeded(receiver)
+}
 
-	// Forward packets only after renegotiation is complete to avoid early SSRC drops.
-	go func() {
-		if !waitForNegotiationStable(receiver.PC, 10*time.Second) {
-			return
-		}
-		rtpBuf := make([]byte, 1500)
-		for {
-			n, _, err := track.Read(rtpBuf)
-			if err != nil {
-				return
-			}
-			if _, err = localTrack.Write(rtpBuf[:n]); err != nil {
-				return
-			}
-		}
-	}()
+func (h *Handler) addTrackToPeer(receiver *Peer, senderID string, track *webrtc.TrackRemote, room *Room) {
+	// Get the forwarder for this sender
+	room.ForwardersMu.RLock()
+	forwarder, exists := room.Forwarders[senderID]
+	room.ForwardersMu.RUnlock()
+
+	if !exists {
+		// The sender doesn't have a forwarder yet, which means they haven't started sending.
+		// This shouldn't happen in normal flow but handle it gracefully.
+		slog.Warn("Forwarder not found for sender", "senderID", senderID)
+		return
+	}
+
+	h.subscribeToForwarder(receiver, senderID, forwarder, track)
 }
 
 func (h *Handler) sendNegotiationNeeded(peer *Peer) {

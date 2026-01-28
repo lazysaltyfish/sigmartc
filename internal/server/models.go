@@ -24,8 +24,90 @@ type Peer struct {
 	PC          *webrtc.PeerConnection
 	TrackRemote *webrtc.TrackRemote
 
+	// OutTracks maps senderID to the local track used to forward that sender's audio to this peer
+	OutTracks   map[string]*webrtc.TrackLocalStaticRTP
+	OutTracksMu sync.RWMutex
+
 	Muted    bool
 	JoinTime time.Time
+}
+
+// TrackForwarder manages fan-out from one sender's TrackRemote to multiple receivers.
+// It reads RTP packets once and writes them to all subscribers.
+type TrackForwarder struct {
+	SenderID    string
+	TrackRemote *webrtc.TrackRemote
+
+	mu          sync.RWMutex
+	subscribers map[string]*webrtc.TrackLocalStaticRTP // receiverID -> localTrack
+
+	done chan struct{}
+}
+
+// NewTrackForwarder creates a new forwarder for the given sender's track.
+func NewTrackForwarder(senderID string, track *webrtc.TrackRemote) *TrackForwarder {
+	return &TrackForwarder{
+		SenderID:    senderID,
+		TrackRemote: track,
+		subscribers: make(map[string]*webrtc.TrackLocalStaticRTP),
+		done:        make(chan struct{}),
+	}
+}
+
+// Subscribe adds a receiver's local track to the forwarder.
+func (f *TrackForwarder) Subscribe(receiverID string, localTrack *webrtc.TrackLocalStaticRTP) {
+	f.mu.Lock()
+	f.subscribers[receiverID] = localTrack
+	f.mu.Unlock()
+}
+
+// Unsubscribe removes a receiver's local track from the forwarder.
+func (f *TrackForwarder) Unsubscribe(receiverID string) {
+	f.mu.Lock()
+	delete(f.subscribers, receiverID)
+	f.mu.Unlock()
+}
+
+// SubscriberCount returns the number of active subscribers.
+func (f *TrackForwarder) SubscriberCount() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return len(f.subscribers)
+}
+
+// Start begins the forwarding loop. It reads from TrackRemote and writes to all subscribers.
+// This method blocks until the track ends or Stop is called.
+func (f *TrackForwarder) Start() {
+	rtpBuf := make([]byte, 1500)
+	for {
+		select {
+		case <-f.done:
+			return
+		default:
+		}
+
+		n, _, err := f.TrackRemote.Read(rtpBuf)
+		if err != nil {
+			return
+		}
+
+		f.mu.RLock()
+		for _, localTrack := range f.subscribers {
+			// Write to each subscriber, ignore individual write errors
+			localTrack.Write(rtpBuf[:n])
+		}
+		f.mu.RUnlock()
+	}
+}
+
+// Stop signals the forwarder to stop reading.
+func (f *TrackForwarder) Stop() {
+	select {
+	case <-f.done:
+		// Already closed
+	default:
+		close(f.done)
+	}
 }
 
 // Room represents a voice chat session.
@@ -33,6 +115,10 @@ type Room struct {
 	UUID  string
 	Peers map[string]*Peer
 	Lock  sync.RWMutex
+
+	// Forwarders maps senderID to the forwarder handling that sender's audio
+	Forwarders   map[string]*TrackForwarder
+	ForwardersMu sync.RWMutex
 
 	LastEmptyTime time.Time
 	CreatedAt     time.Time
@@ -109,6 +195,7 @@ func (rm *RoomManager) GetOrCreateRoom(uuid string) *Room {
 	room = &Room{
 		UUID:          uuid,
 		Peers:         make(map[string]*Peer),
+		Forwarders:    make(map[string]*TrackForwarder),
 		CreatedAt:     time.Now(),
 		LastEmptyTime: time.Now(),
 	}
