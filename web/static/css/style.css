@@ -490,3 +490,80 @@ input:focus-visible,
         font-size: 28px;
     }
 }
+
+/* Network Status Pill */
+.network-status {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    background: rgba(32, 34, 37, 0.6);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-radius: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    font-size: 0.8em;
+    font-weight: 500;
+    color: var(--text-normal);
+    z-index: 5;
+    transition: opacity 0.3s ease;
+}
+
+.network-icon-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+}
+
+.signal-icon {
+    width: 20px;
+    height: 20px;
+}
+
+.network-details {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+}
+
+.divider {
+    color: rgba(255, 255, 255, 0.2);
+    font-size: 0.9em;
+}
+
+/* Status Colors */
+.status-good { color: var(--success); }
+.status-ok { color: #faa61a; }
+.status-bad { color: var(--danger); }
+
+/* SVG Icon Styling */
+.signal-bar {
+    fill: currentColor;
+    opacity: 0.3;
+    transition: opacity 0.3s ease;
+}
+
+/* Signal Strength Logic handled by JS classes on the SVG or wrapper */
+.status-good .signal-bar { opacity: 1; }
+
+.status-ok .bar-3 { opacity: 0.3; } /* Top bar dim */
+.status-ok .bar-1, .status-ok .bar-2 { opacity: 1; }
+
+.status-bad .bar-2, .status-bad .bar-3 { opacity: 0.3; }
+.status-bad .bar-1 { opacity: 1; }
+
+@media (max-width: 720px) {
+    .network-status {
+        top: 12px;
+        right: 12px;
+        padding: 4px 10px;
+        font-size: 0.75em;
+    }
+}

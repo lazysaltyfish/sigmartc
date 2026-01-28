@@ -109,6 +109,113 @@ const peerVolumeList = document.getElementById('peer-volume-list');
 const peerVolumeEmpty = document.getElementById('peer-volume-empty');
 const btnMixer = document.getElementById('btn-mixer');
 
+// --- Network Stats Manager ---
+class NetworkStatsManager {
+    constructor(pc) {
+        this.pc = pc;
+        this.intervalId = null;
+        this.el = document.getElementById('network-status');
+        this.elRtt = document.getElementById('net-rtt');
+        this.elLoss = document.getElementById('net-loss');
+        this.elContainer = document.getElementById('network-status');
+    }
+
+    start() {
+        if (this.intervalId) return;
+        this.el.classList.remove('hidden');
+        this.intervalId = setInterval(() => this._updateStats(), 2000);
+        this._updateStats(); // Initial call
+    }
+
+    stop() {
+        if (this.intervalId) {
+            clearInterval(this.intervalId);
+            this.intervalId = null;
+        }
+        this.el.classList.add('hidden');
+        this.elRtt.textContent = '-- ms';
+        this.elLoss.textContent = '--% 丢包';
+        this._updateUIClass('status-good'); // Reset color
+    }
+
+    async _updateStats() {
+        if (!this.pc) return;
+        const iceState = this.pc.iceConnectionState;
+        if (iceState !== 'connected' && iceState !== 'completed') return;
+
+        try {
+            const stats = await this.pc.getStats();
+            let rtt = null;
+            let packetsLost = 0;
+            let packetsReceived = 0;
+
+            stats.forEach(report => {
+                if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.currentRoundTripTime !== undefined) {
+                    rtt = report.currentRoundTripTime * 1000; // s to ms
+                }
+                if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+                    packetsLost += (report.packetsLost || 0);
+                    packetsReceived += (report.packetsReceived || 0);
+                }
+            });
+
+            // Calculate Loss Percentage (Simple approximation based on total accumulation)
+            // Note: For instantaneous loss, we'd need to track delta. 
+            // But standard WebRTC stats usually give cumulative.
+            // Let's stick to cumulative for simplicity or implement delta if needed.
+            // Actually, for a real-time indicator, delta is better. Let's try to do delta.
+
+            // However, implementing delta requires state. Let's just use what we have first.
+            // Refinement: We need previous values to calculate interval loss.
+
+            let lossRate = 0;
+            if (this._prevPacketsReceived !== undefined && this._prevPacketsLost !== undefined) {
+                const deltaLost = packetsLost - this._prevPacketsLost;
+                const deltaReceived = packetsReceived - this._prevPacketsReceived;
+                const totalDetails = deltaLost + deltaReceived;
+                if (totalDetails > 0) {
+                    lossRate = (deltaLost / totalDetails) * 100;
+                }
+            }
+
+            this._prevPacketsLost = packetsLost;
+            this._prevPacketsReceived = packetsReceived;
+
+            this._updateUI(rtt, lossRate);
+
+        } catch (e) {
+            console.warn('Failed to get stats:', e);
+        }
+    }
+
+    _updateUI(rtt, lossRate) {
+        // RTT Display
+        const rttVal = rtt !== null ? Math.round(rtt) : '--';
+        this.elRtt.textContent = `${rttVal} ms`;
+
+        // Loss Display
+        const lossVal = lossRate.toFixed(1);
+        this.elLoss.textContent = `${lossVal}% 丢包`;
+
+        // Determine Status
+        let status = 'status-good';
+        if ((rtt !== null && rtt > 300) || lossRate > 5) {
+            status = 'status-bad';
+        } else if ((rtt !== null && rtt > 100) || lossRate > 1) {
+            status = 'status-ok';
+        }
+
+        this._updateUIClass(status);
+    }
+
+    _updateUIClass(statusClass) {
+        this.elContainer.classList.remove('status-good', 'status-ok', 'status-bad');
+        this.elContainer.classList.add(statusClass);
+    }
+}
+
+let netStatsManager = null;
+
 // 1. Initialize URL and View
 const path = window.location.pathname;
 let roomUUID = path.startsWith('/r/') ? path.substring(3) : '';
@@ -144,6 +251,12 @@ function leaveRoom() {
     if (isLeaving) return;
     isLeaving = true;
     notifiedDisconnect = true;
+
+    if (netStatsManager) {
+        netStatsManager.stop();
+        netStatsManager = null;
+    }
+
     // 1. Close WebRTC
     if (pc) {
         pc.close();
@@ -786,6 +899,12 @@ function initWebRTC() {
     makingOffer = false;
     ignoreOffer = false;
 
+    // Start network stats manager immediately
+    if (!netStatsManager) {
+        netStatsManager = new NetworkStatsManager(pc);
+        netStatsManager.start();
+    }
+
     localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
     pc.onicecandidate = (e) => {
@@ -817,6 +936,8 @@ function initWebRTC() {
 
         setupVAD(stream, peerId);
     };
+
+
 
     pc.onnegotiationneeded = async () => {
         try {

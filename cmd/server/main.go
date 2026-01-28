@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"github.com/pion/ice/v2"
 	"github.com/pion/webrtc/v3"
 )
+
+var Version = "dev"
 
 func main() {
 	port := flag.Int("port", 8080, "HTTP Port")
@@ -77,7 +80,22 @@ func main() {
 	mux.Handle("/", withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// If it's the root or a room path, serve the app
 		if r.URL.Path == "/" || (len(r.URL.Path) > 3 && r.URL.Path[:3] == "/r/") {
-			http.ServeFile(w, r, "web/templates/index.html")
+			tmpl, err := template.ParseFiles("web/templates/index.html")
+			if err != nil {
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				slog.Error("Failed to parse template", "err", err)
+				return
+			}
+			
+			data := struct {
+				Version string
+			}{
+				Version: Version,
+			}
+
+			if err := tmpl.Execute(w, data); err != nil {
+				slog.Error("Failed to execute template", "err", err)
+			}
 			return
 		}
 		http.NotFound(w, r)

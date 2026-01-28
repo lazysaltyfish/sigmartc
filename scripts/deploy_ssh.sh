@@ -72,7 +72,8 @@ set -euo pipefail
 image="$1"
 context_dir="$2"
 
-docker build -t "$image" "$context_dir"
+VERSION=$(date +%s)
+docker build --build-arg VERSION="$VERSION" -t "$image" "$context_dir"
 EOF
 
 ssh $SSH_OPTS "$TARGET" bash -s -- \
