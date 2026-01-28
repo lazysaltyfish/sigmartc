@@ -279,6 +279,9 @@ func (h *Handler) subscribeToForwarder(receiver *Peer, senderID string, forwarde
 	if receiver.PC == nil {
 		return
 	}
+	if receiver.ID == senderID {
+		return
+	}
 
 	// Create a local track to push data to the receiver
 	// Use senderID as the StreamID so the client can map it to a user
@@ -288,11 +291,19 @@ func (h *Handler) subscribeToForwarder(receiver *Peer, senderID string, forwarde
 		return
 	}
 
-	_, err = receiver.PC.AddTrack(localTrack)
+	sender, err := receiver.PC.AddTrack(localTrack)
 	if err != nil {
 		slog.Error("Failed to add track to PC", "err", err)
 		return
 	}
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			if _, _, rtcpErr := sender.Read(rtcpBuf); rtcpErr != nil {
+				return
+			}
+		}
+	}()
 
 	// Store the outgoing track for this receiver
 	receiver.OutTracksMu.Lock()
@@ -306,7 +317,7 @@ func (h *Handler) subscribeToForwarder(receiver *Peer, senderID string, forwarde
 	forwarder.Subscribe(receiver.ID, localTrack)
 
 	// Trigger renegotiation
-	h.sendNegotiationNeeded(receiver)
+	h.requestNegotiation(receiver)
 }
 
 func (h *Handler) addTrackToPeer(receiver *Peer, senderID string, track *webrtc.TrackRemote, room *Room) {
@@ -325,21 +336,88 @@ func (h *Handler) addTrackToPeer(receiver *Peer, senderID string, track *webrtc.
 	h.subscribeToForwarder(receiver, senderID, forwarder, track)
 }
 
-func (h *Handler) sendNegotiationNeeded(peer *Peer) {
-	if peer.PC == nil {
+func (h *Handler) requestNegotiation(peer *Peer) {
+	peer.NegotiationMu.Lock()
+	peer.NegotiationPending = true
+	if peer.NegotiationInProgress {
+		peer.NegotiationMu.Unlock()
 		return
 	}
-	offer, err := peer.PC.CreateOffer(nil)
-	if err != nil {
-		return
+	peer.NegotiationInProgress = true
+	peer.NegotiationMu.Unlock()
+
+	go h.runNegotiation(peer)
+}
+
+func (h *Handler) runNegotiation(peer *Peer) {
+	defer func() {
+		peer.NegotiationMu.Lock()
+		peer.NegotiationInProgress = false
+		peer.NegotiationMu.Unlock()
+	}()
+
+	for {
+		peer.NegotiationMu.Lock()
+		pending := peer.NegotiationPending
+		peer.NegotiationMu.Unlock()
+		if !pending {
+			return
+		}
+
+		pc := peer.PC
+		if pc == nil {
+			peer.NegotiationMu.Lock()
+			peer.NegotiationPending = false
+			peer.NegotiationMu.Unlock()
+			return
+		}
+
+		if pc.SignalingState() != webrtc.SignalingStateStable || pc.RemoteDescription() == nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+
+		peer.NegotiationMu.Lock()
+		peer.NegotiationPending = false
+		peer.MakingOffer = true
+		peer.NegotiationMu.Unlock()
+
+		offer, err := pc.CreateOffer(nil)
+		if err == nil {
+			err = pc.SetLocalDescription(offer)
+		}
+
+		peer.NegotiationMu.Lock()
+		peer.MakingOffer = false
+		if err != nil {
+			peer.NegotiationPending = true
+		}
+		peer.NegotiationMu.Unlock()
+
+		if err != nil {
+			slog.Warn("Failed to create offer", "peer_id", peer.ID, "err", err)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		peer.WriteJSON(map[string]any{
+			"type": "offer",
+			"sdp":  offer.SDP,
+		})
 	}
-	if err = peer.PC.SetLocalDescription(offer); err != nil {
-		return
+}
+
+func (h *Handler) flushPendingCandidates(peer *Peer) {
+	peer.PendingCandidatesMu.Lock()
+	pending := peer.PendingCandidates
+	peer.PendingCandidates = nil
+	peer.PendingCandidatesMu.Unlock()
+
+	for _, candidate := range pending {
+		if err := peer.PC.AddICECandidate(candidate); err != nil {
+			slog.Warn("Failed to add pending ICE candidate", "peer_id", peer.ID, "err", err)
+		}
 	}
-	peer.WriteJSON(map[string]any{
-		"type": "offer",
-		"sdp":  offer.SDP,
-	})
 }
 
 func waitForNegotiationStable(pc *webrtc.PeerConnection, timeout time.Duration) bool {
@@ -378,6 +456,14 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 
 	switch t {
 	case "offer":
+		peer.NegotiationMu.Lock()
+		offerCollision := peer.MakingOffer || peer.PC.SignalingState() != webrtc.SignalingStateStable
+		peer.NegotiationMu.Unlock()
+		if offerCollision {
+			slog.Info("Ignoring offer due to collision", "peer_id", peer.ID)
+			return
+		}
+
 		sdp, _ := msg["sdp"].(string)
 		err := peer.PC.SetRemoteDescription(webrtc.SessionDescription{
 			Type: webrtc.SDPTypeOffer,
@@ -387,6 +473,7 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 			slog.Error("SetRemoteDescription failed", "err", err)
 			return
 		}
+		h.flushPendingCandidates(peer)
 		answer, err := peer.PC.CreateAnswer(nil)
 		if err != nil {
 			return
@@ -401,10 +488,14 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 
 	case "answer":
 		sdp, _ := msg["sdp"].(string)
-		peer.PC.SetRemoteDescription(webrtc.SessionDescription{
+		if err := peer.PC.SetRemoteDescription(webrtc.SessionDescription{
 			Type: webrtc.SDPTypeAnswer,
 			SDP:  sdp,
-		})
+		}); err != nil {
+			slog.Error("SetRemoteDescription failed", "err", err)
+			return
+		}
+		h.flushPendingCandidates(peer)
 
 	case "candidate":
 		candidateData, _ := msg["candidate"].(map[string]any)
@@ -413,7 +504,15 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 		if err := json.Unmarshal(candidateJSON, &candidate); err != nil {
 			return
 		}
-		peer.PC.AddICECandidate(candidate)
+		if peer.PC.RemoteDescription() == nil {
+			peer.PendingCandidatesMu.Lock()
+			peer.PendingCandidates = append(peer.PendingCandidates, candidate)
+			peer.PendingCandidatesMu.Unlock()
+			return
+		}
+		if err := peer.PC.AddICECandidate(candidate); err != nil {
+			slog.Warn("Failed to add ICE candidate", "peer_id", peer.ID, "err", err)
+		}
 	}
 }
 

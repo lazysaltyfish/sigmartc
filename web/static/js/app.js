@@ -92,6 +92,7 @@ const vadState = new Map();
 let makingOffer = false;
 let ignoreOffer = false;
 const isPolite = true;
+let pendingIceCandidates = [];
 
 const joinView = document.getElementById('join-view');
 const roomView = document.getElementById('room-view');
@@ -140,35 +141,46 @@ class NetworkStatsManager {
 
     async _updateStats() {
         if (!this.pc) return;
-        const iceState = this.pc.iceConnectionState;
-        if (iceState !== 'connected' && iceState !== 'completed') return;
 
         try {
             const stats = await this.pc.getStats();
             let rtt = null;
+            let fallbackRtt = null;
             let packetsLost = 0;
             let packetsReceived = 0;
+            let selectedPairId = null;
 
             stats.forEach(report => {
-                if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.currentRoundTripTime !== undefined) {
-                    rtt = report.currentRoundTripTime * 1000; // s to ms
+                if (report.type === 'transport' && report.selectedCandidatePairId) {
+                    selectedPairId = report.selectedCandidatePairId;
                 }
-                if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+            });
+
+            stats.forEach(report => {
+                if (report.type === 'candidate-pair' && report.currentRoundTripTime !== undefined) {
+                    const isSelected = report.id === selectedPairId || report.selected || report.nominated;
+                    if (isSelected) {
+                        rtt = report.currentRoundTripTime * 1000; // s to ms
+                    } else if (fallbackRtt === null && report.state === 'succeeded') {
+                        fallbackRtt = report.currentRoundTripTime * 1000;
+                    }
+                }
+                if (report.type === 'remote-inbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio') && report.roundTripTime !== undefined) {
+                    if (rtt === null) {
+                        rtt = report.roundTripTime * 1000;
+                    }
+                }
+                if (report.type === 'inbound-rtp' && (report.kind === 'audio' || report.mediaType === 'audio') && !report.isRemote) {
                     packetsLost += (report.packetsLost || 0);
                     packetsReceived += (report.packetsReceived || 0);
                 }
             });
 
-            // Calculate Loss Percentage (Simple approximation based on total accumulation)
-            // Note: For instantaneous loss, we'd need to track delta. 
-            // But standard WebRTC stats usually give cumulative.
-            // Let's stick to cumulative for simplicity or implement delta if needed.
-            // Actually, for a real-time indicator, delta is better. Let's try to do delta.
+            if (rtt === null && fallbackRtt !== null) {
+                rtt = fallbackRtt;
+            }
 
-            // However, implementing delta requires state. Let's just use what we have first.
-            // Refinement: We need previous values to calculate interval loss.
-
-            let lossRate = 0;
+            let lossRate = null;
             if (this._prevPacketsReceived !== undefined && this._prevPacketsLost !== undefined) {
                 const deltaLost = packetsLost - this._prevPacketsLost;
                 const deltaReceived = packetsReceived - this._prevPacketsReceived;
@@ -176,6 +188,8 @@ class NetworkStatsManager {
                 if (totalDetails > 0) {
                     lossRate = (deltaLost / totalDetails) * 100;
                 }
+            } else if (packetsReceived + packetsLost > 0) {
+                lossRate = 0;
             }
 
             this._prevPacketsLost = packetsLost;
@@ -194,14 +208,14 @@ class NetworkStatsManager {
         this.elRtt.textContent = `${rttVal} ms`;
 
         // Loss Display
-        const lossVal = lossRate.toFixed(1);
+        const lossVal = lossRate === null ? '--' : lossRate.toFixed(1);
         this.elLoss.textContent = `${lossVal}% 丢包`;
 
         // Determine Status
         let status = 'status-good';
-        if ((rtt !== null && rtt > 300) || lossRate > 5) {
+        if ((rtt !== null && rtt > 300) || (lossRate !== null && lossRate > 5)) {
             status = 'status-bad';
-        } else if ((rtt !== null && rtt > 100) || lossRate > 1) {
+        } else if ((rtt !== null && rtt > 100) || (lossRate !== null && lossRate > 1)) {
             status = 'status-ok';
         }
 
@@ -866,6 +880,7 @@ function startSignaling(name) {
                         await pc.setLocalDescription({ type: 'rollback' });
                     }
                     await pc.setRemoteDescription(offer);
+                    await flushPendingIceCandidates();
                     const answer = await pc.createAnswer();
                     await pc.setLocalDescription(answer);
                     ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
@@ -876,9 +891,10 @@ function startSignaling(name) {
                     return;
                 }
                 await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
+                await flushPendingIceCandidates();
                 break;
             case 'candidate':
-                await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                await addIceCandidateSafely(msg.candidate);
                 break;
             case 'error':
                 handleSocketFailure(msg.message || '连接已断开');
@@ -894,18 +910,39 @@ function handleSocketFailure(message) {
     leaveRoom();
 }
 
+async function addIceCandidateSafely(candidate) {
+    if (!pc || !candidate) return;
+    if (!pc.remoteDescription) {
+        pendingIceCandidates.push(candidate);
+        return;
+    }
+    try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (e) {
+        console.warn('Failed to add ICE candidate:', e);
+    }
+}
+
+async function flushPendingIceCandidates() {
+    if (!pc || !pc.remoteDescription || pendingIceCandidates.length === 0) return;
+    const pending = pendingIceCandidates;
+    pendingIceCandidates = [];
+    for (const candidate of pending) {
+        await addIceCandidateSafely(candidate);
+    }
+}
+
 function initWebRTC() {
     pc = new RTCPeerConnection(config);
     makingOffer = false;
     ignoreOffer = false;
+    pendingIceCandidates = [];
 
     // Start network stats manager immediately
     if (!netStatsManager) {
         netStatsManager = new NetworkStatsManager(pc);
         netStatsManager.start();
     }
-
-    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
     pc.onicecandidate = (e) => {
         if (e.candidate) {
@@ -914,8 +951,11 @@ function initWebRTC() {
     };
 
     pc.ontrack = (e) => {
-        const stream = e.streams[0];
-        const peerId = stream.id || e.track.id; // StreamID is now forced to be PeerID by the server
+        const stream = e.streams[0] || new MediaStream([e.track]);
+        const peerId = (e.streams[0] && e.streams[0].id) || e.track.id; // StreamID is now forced to be PeerID by the server
+        if (peerId === myId) {
+            return;
+        }
 
         // Create audio element
         let audio = document.getElementById('audio-' + peerId);
@@ -941,6 +981,9 @@ function initWebRTC() {
 
     pc.onnegotiationneeded = async () => {
         try {
+            if (makingOffer) {
+                return;
+            }
             makingOffer = true;
             if (pc.signalingState !== 'stable') {
                 return;
@@ -954,6 +997,26 @@ function initWebRTC() {
             makingOffer = false;
         }
     };
+
+    // Add local tracks after handlers are set to avoid missing negotiationneeded.
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+    // Safety net: trigger initial negotiation if the event was missed.
+    queueMicrotask(async () => {
+        if (!pc || pc.signalingState !== 'stable' || pc.localDescription) return;
+        try {
+            makingOffer = true;
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+            }
+        } catch (e) {
+            console.warn('Initial offer failed:', e);
+        } finally {
+            makingOffer = false;
+        }
+    });
 }
 
 // 4. UI Helpers

@@ -559,6 +559,15 @@ input:focus-visible,
 .status-bad .bar-2, .status-bad .bar-3 { opacity: 0.3; }
 .status-bad .bar-1 { opacity: 1; }
 
+.audio-container {
+    position: absolute;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+}
+
 @media (max-width: 720px) {
     .network-status {
         top: 12px;

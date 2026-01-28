@@ -28,6 +28,14 @@ type Peer struct {
 	OutTracks   map[string]*webrtc.TrackLocalStaticRTP
 	OutTracksMu sync.RWMutex
 
+	NegotiationMu         sync.Mutex
+	NegotiationPending    bool
+	NegotiationInProgress bool
+	MakingOffer           bool
+
+	PendingCandidatesMu sync.Mutex
+	PendingCandidates   []webrtc.ICECandidateInit
+
 	Muted    bool
 	JoinTime time.Time
 }
