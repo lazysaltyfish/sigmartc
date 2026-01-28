@@ -86,6 +86,8 @@ let mixerOpen = false;
 let localName = '';
 let isLeaving = false;
 let notifiedDisconnect = false;
+let didCleanup = false;
+let isUnloading = false;
 let vadAudioContext;
 let pendingSelfVAD = null;
 const vadState = new Map();
@@ -265,6 +267,12 @@ function leaveRoom() {
     if (isLeaving) return;
     isLeaving = true;
     notifiedDisconnect = true;
+    cleanupSession({ redirect: false, showJoin: true });
+}
+
+function cleanupSession({ redirect, showJoin }) {
+    if (didCleanup) return;
+    didCleanup = true;
 
     if (netStatsManager) {
         netStatsManager.stop();
@@ -311,9 +319,25 @@ function leaveRoom() {
     peers.forEach((_, id) => cleanupPeerAudio(id));
     peers.clear();
     setMixerOpen(false);
+    myId = null;
+    makingOffer = false;
+    ignoreOffer = false;
 
-    // 4. Redirect to home
-    window.location.href = '/';
+    if (userList) userList.innerHTML = '';
+    if (avatarGrid) avatarGrid.innerHTML = '';
+    if (audioContainer) audioContainer.innerHTML = '';
+    if (peerVolumeList) peerVolumeList.innerHTML = '';
+    updatePeerVolumeEmptyState();
+
+    if (redirect) {
+        window.location.href = '/';
+        return;
+    }
+
+    if (showJoin) {
+        joinView.classList.remove('hidden');
+        roomView.classList.add('hidden');
+    }
 }
 
 document.getElementById('btn-mute').onclick = toggleMute;
@@ -346,6 +370,8 @@ initInputDevices();
 
 function handleJoin(name, rawStream) {
     localName = name;
+    didCleanup = false;
+    isUnloading = false;
     isLeaving = false;
     notifiedDisconnect = false;
     localRawStream = rawStream;
@@ -379,6 +405,30 @@ window.addEventListener('resize', () => {
     if (!roomView.classList.contains('hidden')) {
         syncMixerForViewport();
     }
+});
+
+window.addEventListener('beforeunload', (event) => {
+    if (roomView.classList.contains('hidden')) return;
+    if (isLeaving || didCleanup) return;
+    isUnloading = true;
+    const prevNotified = notifiedDisconnect;
+    notifiedDisconnect = true;
+    event.preventDefault();
+    event.returnValue = '';
+    setTimeout(() => {
+        if (!didCleanup) {
+            isUnloading = false;
+            notifiedDisconnect = prevNotified;
+        }
+    }, 0);
+});
+
+window.addEventListener('pagehide', () => {
+    if (roomView.classList.contains('hidden')) return;
+    if (didCleanup) return;
+    isUnloading = true;
+    notifiedDisconnect = true;
+    cleanupSession({ redirect: false, showJoin: false });
 });
 
 function setupLocalAudio(rawStream) {
@@ -843,11 +893,17 @@ function startSignaling(name) {
     ws = new WebSocket(`${protocol}//${window.location.host}/ws?room=${roomUUID}&name=${encodeURIComponent(name)}`);
 
     ws.onclose = () => {
+        if (isUnloading || document.visibilityState !== 'visible') {
+            return;
+        }
         if (!notifiedDisconnect) {
             handleSocketFailure('连接已断开');
         }
     };
     ws.onerror = () => {
+        if (isUnloading || document.visibilityState !== 'visible') {
+            return;
+        }
         if (!notifiedDisconnect) {
             handleSocketFailure('连接失败');
         }
@@ -905,6 +961,7 @@ function startSignaling(name) {
 
 function handleSocketFailure(message) {
     if (notifiedDisconnect) return;
+    if (isUnloading || didCleanup) return;
     notifiedDisconnect = true;
     alert(message);
     leaveRoom();
@@ -957,7 +1014,7 @@ function initWebRTC() {
             return;
         }
 
-        // Create audio element
+        // Create audio element to satisfy autoplay policies, but keep output silent.
         let audio = document.getElementById('audio-' + peerId);
         if (!audio) {
             audio = document.createElement('audio');
@@ -967,11 +1024,12 @@ function initWebRTC() {
             audioContainer.appendChild(audio);
         }
         audio.srcObject = stream;
+        audio.volume = 0;
         const playPromise = audio.play();
         if (playPromise && typeof playPromise.catch === 'function') {
             playPromise.catch(() => { });
         }
-        attachRemoteAudio(peerId, audio);
+        attachRemoteAudio(peerId, stream, audio);
         resumeAudioContexts();
 
         setupVAD(stream, peerId);
@@ -1135,7 +1193,7 @@ function setPeerVolume(peerId, percent, valueEl) {
     }
 }
 
-function attachRemoteAudio(peerId, audioEl) {
+function attachRemoteAudio(peerId, stream, audioEl) {
     let peer = peers.get(peerId);
     if (!peer) {
         peer = { name: peerId, volumePercent: 100 };
@@ -1150,7 +1208,7 @@ function attachRemoteAudio(peerId, audioEl) {
     }
 
     const ctx = getRemoteAudioContext();
-    const source = ctx.createMediaElementSource(audioEl);
+    const source = ctx.createMediaStreamSource(stream);
     const gainNode = ctx.createGain();
     const percent = peer.volumePercent ?? 100;
     gainNode.gain.value = percentToGain(percent);
