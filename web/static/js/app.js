@@ -35,6 +35,7 @@ let sfxPrimed = false;
 const supportsContextSink = Boolean(window.AudioContext && typeof AudioContext.prototype.setSinkId === 'function');
 const supportsElementSink = Boolean(window.HTMLMediaElement && typeof HTMLMediaElement.prototype.setSinkId === 'function');
 let preferredOutputDeviceId = 'default';
+let preferredInputDeviceId = 'default';
 
 function primeSfx() {
     if (sfxPrimed || typeof Audio !== 'function') return;
@@ -57,12 +58,12 @@ function playSfx(key) {
     if (supportsElementSink && preferredOutputDeviceId) {
         const sinkPromise = clip.setSinkId(preferredOutputDeviceId);
         if (sinkPromise && typeof sinkPromise.catch === 'function') {
-            sinkPromise.catch(() => {});
+            sinkPromise.catch(() => { });
         }
     }
     const playPromise = clip.play();
     if (playPromise && typeof playPromise.catch === 'function') {
-        playPromise.catch(() => {});
+        playPromise.catch(() => { });
     }
 }
 const audioDebug = isTestMode ? { micGain: 1, peerGains: {} } : null;
@@ -102,6 +103,8 @@ const micGainInput = document.getElementById('mic-gain');
 const micGainValue = document.getElementById('mic-gain-value');
 const playbackDeviceSelect = document.getElementById('playback-device');
 const playbackHelp = document.getElementById('playback-help');
+const inputDeviceSelect = document.getElementById('input-device');
+const inputHelp = document.getElementById('input-help');
 const peerVolumeList = document.getElementById('peer-volume-list');
 const peerVolumeEmpty = document.getElementById('peer-volume-empty');
 const btnMixer = document.getElementById('btn-mixer');
@@ -123,7 +126,8 @@ document.getElementById('btn-join').onclick = async () => {
     primeSfx();
 
     try {
-        const stream = isTestMode ? await createTestToneStream() : await navigator.mediaDevices.getUserMedia({ audio: true });
+        const audioConstraints = buildAudioConstraints(preferredInputDeviceId);
+        const stream = isTestMode ? await createTestToneStream() : await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
         handleJoin(name, stream);
     } catch (e) {
         alert('无法访问麦克风: ' + e.message);
@@ -180,7 +184,7 @@ function leaveRoom() {
     peers.forEach((_, id) => cleanupPeerAudio(id));
     peers.clear();
     setMixerOpen(false);
-    
+
     // 4. Redirect to home
     window.location.href = '/';
 }
@@ -211,6 +215,7 @@ document.getElementById('btn-copy').onclick = () => {
 };
 
 initPlaybackDevices();
+initInputDevices();
 
 function handleJoin(name, rawStream) {
     localName = name;
@@ -222,6 +227,8 @@ function handleJoin(name, rawStream) {
     getRemoteAudioContext();
     resumeAudioContexts();
     refreshPlaybackDevices();
+    refreshInputDevices();
+    setTimeout(refreshInputDevices, 200);
 
     joinView.classList.add('hidden');
     roomView.classList.remove('hidden');
@@ -289,6 +296,12 @@ function setPlaybackHelp(message) {
     playbackHelp.style.display = message ? 'block' : 'none';
 }
 
+function setInputHelp(message) {
+    if (!inputHelp) return;
+    inputHelp.textContent = message || '';
+    inputHelp.style.display = message ? 'block' : 'none';
+}
+
 function loadPreferredPlaybackDevice() {
     try {
         const stored = localStorage.getItem('playbackDeviceId');
@@ -306,6 +319,28 @@ function persistPreferredPlaybackDevice() {
     }
 }
 
+function loadPreferredInputDevice() {
+    try {
+        const stored = localStorage.getItem('inputDeviceId');
+        if (stored) preferredInputDeviceId = stored;
+    } catch (e) {
+        // Ignore storage access issues.
+    }
+}
+
+function persistPreferredInputDevice() {
+    try {
+        localStorage.setItem('inputDeviceId', preferredInputDeviceId);
+    } catch (e) {
+        // Ignore storage access issues.
+    }
+}
+
+function buildAudioConstraints(deviceId) {
+    if (!deviceId || deviceId === 'default') return true;
+    return { deviceId: { exact: deviceId } };
+}
+
 function applyOutputDeviceToContext(deviceId) {
     if (!supportsContextSink || !remoteAudioContext || !deviceId) return;
     remoteAudioContext.setSinkId(deviceId).then(() => {
@@ -320,6 +355,15 @@ function setPreferredPlaybackDevice(deviceId) {
     preferredOutputDeviceId = deviceId;
     persistPreferredPlaybackDevice();
     applyOutputDeviceToContext(deviceId);
+}
+
+function setPreferredInputDevice(deviceId) {
+    if (!deviceId) return;
+    preferredInputDeviceId = deviceId;
+    persistPreferredInputDevice();
+    if (localStream && !isLeaving) {
+        switchInputDevice(deviceId);
+    }
 }
 
 async function refreshPlaybackDevices() {
@@ -370,6 +414,106 @@ async function refreshPlaybackDevices() {
     setPreferredPlaybackDevice(nextId);
 }
 
+async function refreshInputDevices() {
+    if (!inputDeviceSelect) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        inputDeviceSelect.disabled = true;
+        setInputHelp('当前浏览器不支持枚举输入设备');
+        return;
+    }
+    let devices = [];
+    try {
+        devices = await navigator.mediaDevices.enumerateDevices();
+    } catch (e) {
+        inputDeviceSelect.disabled = true;
+        setInputHelp('无法读取输入设备');
+        return;
+    }
+    const inputs = devices.filter((device) => device.kind === 'audioinput');
+    inputDeviceSelect.innerHTML = '';
+
+    // Even if inputs.length > 0, check if they have valid labels (permissions granted)
+    // Some browsers return devices but with empty labels before permission
+    const hasValidInputs = inputs.some((device) => device.label && device.label.length > 0);
+
+    if (inputs.length === 0 || !hasValidInputs) {
+        // Try to seed from current stream as fallback
+        if (seedInputDeviceFromStream()) {
+            return;
+        }
+        // If we have devices but no labels, show generic option
+        if (inputs.length > 0) {
+            inputs.forEach((device, index) => {
+                const option = document.createElement('option');
+                option.value = device.deviceId || 'default';
+                option.textContent = `输入设备 ${index + 1}`;
+                inputDeviceSelect.appendChild(option);
+            });
+            inputDeviceSelect.disabled = false;
+            setInputHelp('');
+            inputDeviceSelect.value = inputs[0].deviceId || 'default';
+            return;
+        }
+        inputDeviceSelect.disabled = true;
+        setInputHelp('未检测到输入设备');
+        return;
+    }
+
+    // Build the device options
+    inputs.forEach((device, index) => {
+        const option = document.createElement('option');
+        option.value = device.deviceId || 'default';
+        option.textContent = device.label || `输入设备 ${index + 1}`;
+        inputDeviceSelect.appendChild(option);
+    });
+
+    // Also add the current stream device if not already in the list
+    if (localRawStream) {
+        const track = localRawStream.getAudioTracks()[0];
+        if (track) {
+            const settings = typeof track.getSettings === 'function' ? track.getSettings() : {};
+            const streamDeviceId = settings.deviceId;
+            const streamLabel = track.label;
+            if (streamDeviceId && !inputs.some((d) => d.deviceId === streamDeviceId)) {
+                const option = document.createElement('option');
+                option.value = streamDeviceId;
+                option.textContent = streamLabel || '当前输入设备';
+                inputDeviceSelect.appendChild(option);
+            }
+        }
+    }
+
+    inputDeviceSelect.disabled = false;
+    setInputHelp('');
+
+    let nextId = preferredInputDeviceId;
+    if (!inputs.some((device) => device.deviceId === nextId)) {
+        const defaultDevice = inputs.find((device) => device.deviceId === 'default');
+        nextId = defaultDevice?.deviceId || inputs[0].deviceId;
+    }
+    inputDeviceSelect.value = nextId;
+    setPreferredInputDevice(nextId);
+}
+
+function seedInputDeviceFromStream() {
+    if (!inputDeviceSelect || !localRawStream) return false;
+    const track = localRawStream.getAudioTracks()[0];
+    if (!track) return false;
+    const settings = typeof track.getSettings === 'function' ? track.getSettings() : {};
+    const deviceId = settings.deviceId || 'default';
+    const label = track.label || '当前输入设备';
+    const option = document.createElement('option');
+    option.value = deviceId;
+    option.textContent = label;
+    inputDeviceSelect.appendChild(option);
+    inputDeviceSelect.disabled = false;
+    setInputHelp('');
+    preferredInputDeviceId = deviceId;
+    persistPreferredInputDevice();
+    inputDeviceSelect.value = deviceId;
+    return true;
+}
+
 function initPlaybackDevices() {
     if (!playbackDeviceSelect) return;
     loadPreferredPlaybackDevice();
@@ -380,6 +524,69 @@ function initPlaybackDevices() {
         navigator.mediaDevices.addEventListener('devicechange', refreshPlaybackDevices);
     }
     refreshPlaybackDevices();
+}
+
+function initInputDevices() {
+    if (!inputDeviceSelect) return;
+    loadPreferredInputDevice();
+    inputDeviceSelect.addEventListener('change', () => {
+        setPreferredInputDevice(inputDeviceSelect.value);
+    });
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+        navigator.mediaDevices.addEventListener('devicechange', refreshInputDevices);
+    }
+    refreshInputDevices();
+}
+
+async function switchInputDevice(deviceId) {
+    if (isTestMode) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setInputHelp('当前浏览器不支持切换输入设备');
+        return;
+    }
+    const constraints = buildAudioConstraints(deviceId);
+    let newRawStream;
+    try {
+        newRawStream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+    } catch (e) {
+        setInputHelp('无法切换输入设备，请检查权限');
+        return;
+    }
+
+    const oldRawStream = localRawStream;
+    const oldLocalStream = localStream;
+    const oldAudioContext = localAudioContext;
+
+    localRawStream = newRawStream;
+    localStream = setupLocalAudio(newRawStream);
+    setMicGain(micGainInput?.value ?? 100);
+    resumeAudioContexts();
+
+    if (pc) {
+        const newTrack = localStream.getAudioTracks()[0];
+        if (newTrack) {
+            const senders = pc.getSenders().filter((sender) => sender.track && sender.track.kind === 'audio');
+            if (senders.length > 0) {
+                await Promise.all(senders.map((sender) => sender.replaceTrack(newTrack)));
+            } else {
+                pc.addTrack(newTrack, localStream);
+            }
+        }
+    }
+
+    queueSelfVAD(localStream, localName);
+
+    if (oldRawStream) {
+        oldRawStream.getTracks().forEach((track) => track.stop());
+    }
+    if (oldLocalStream) {
+        oldLocalStream.getTracks().forEach((track) => track.stop());
+    }
+    if (oldAudioContext) {
+        oldAudioContext.close();
+    }
+
+    setInputHelp('');
 }
 
 function getRemoteAudioContext() {
@@ -578,7 +785,7 @@ function initWebRTC() {
     pc = new RTCPeerConnection(config);
     makingOffer = false;
     ignoreOffer = false;
-    
+
     localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
     pc.onicecandidate = (e) => {
@@ -603,7 +810,7 @@ function initWebRTC() {
         audio.srcObject = stream;
         const playPromise = audio.play();
         if (playPromise && typeof playPromise.catch === 'function') {
-            playPromise.catch(() => {});
+            playPromise.catch(() => { });
         }
         attachRemoteAudio(peerId, audio);
         resumeAudioContexts();
@@ -677,13 +884,13 @@ function toggleMute() {
     if (tracks.length > 0) {
         tracks[0].enabled = !isMuted;
     }
-    
+
     const btn = document.getElementById('btn-mute');
     btn.innerHTML = isMuted ? ICONS.micOff : ICONS.micOn;
-    
+
     // Toggle visual style: Red background when muted
     btn.classList.toggle('btn-danger', isMuted);
-    
+
     document.getElementById(`avatar-${myId}`)?.classList.toggle('muted', isMuted);
 }
 
