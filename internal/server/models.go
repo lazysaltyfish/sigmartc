@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"sync"
@@ -21,8 +23,7 @@ type Peer struct {
 	Conn    *websocket.Conn
 	WsMutex sync.Mutex
 
-	PC          *webrtc.PeerConnection
-	TrackRemote *webrtc.TrackRemote
+	PC *webrtc.PeerConnection
 
 	// OutTracks maps senderID to the local track used to forward that sender's audio to this peer
 	OutTracks   map[string]*webrtc.TrackLocalStaticRTP
@@ -32,12 +33,17 @@ type Peer struct {
 	NegotiationPending    bool
 	NegotiationInProgress bool
 	MakingOffer           bool
+	IceRestartPending     bool
+	LastIceRestart        time.Time
 
 	PendingCandidatesMu sync.Mutex
 	PendingCandidates   []webrtc.ICECandidateInit
 
 	Muted    bool
 	JoinTime time.Time
+
+	Done     chan struct{}
+	doneOnce sync.Once
 }
 
 // TrackForwarder manages fan-out from one sender's TrackRemote to multiple receivers.
@@ -48,8 +54,11 @@ type TrackForwarder struct {
 
 	mu          sync.RWMutex
 	subscribers map[string]*webrtc.TrackLocalStaticRTP // receiverID -> localTrack
+	writeErrAt  map[string]time.Time
 
-	done chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+	onStop   func(error)
 }
 
 // NewTrackForwarder creates a new forwarder for the given sender's track.
@@ -58,6 +67,7 @@ func NewTrackForwarder(senderID string, track *webrtc.TrackRemote) *TrackForward
 		SenderID:    senderID,
 		TrackRemote: track,
 		subscribers: make(map[string]*webrtc.TrackLocalStaticRTP),
+		writeErrAt:  make(map[string]time.Time),
 		done:        make(chan struct{}),
 	}
 }
@@ -96,25 +106,67 @@ func (f *TrackForwarder) Start() {
 
 		n, _, err := f.TrackRemote.Read(rtpBuf)
 		if err != nil {
+			f.stopWithError(err)
 			return
 		}
 
+		type subscriberEntry struct {
+			id    string
+			track *webrtc.TrackLocalStaticRTP
+		}
 		f.mu.RLock()
-		for _, localTrack := range f.subscribers {
-			// Write to each subscriber, ignore individual write errors
-			localTrack.Write(rtpBuf[:n])
+		subscribers := make([]subscriberEntry, 0, len(f.subscribers))
+		for receiverID, localTrack := range f.subscribers {
+			subscribers = append(subscribers, subscriberEntry{id: receiverID, track: localTrack})
 		}
 		f.mu.RUnlock()
+
+		for _, sub := range subscribers {
+			if _, writeErr := sub.track.Write(rtpBuf[:n]); writeErr != nil {
+				f.recordWriteError(sub.id, writeErr)
+			}
+		}
 	}
 }
 
 // Stop signals the forwarder to stop reading.
 func (f *TrackForwarder) Stop() {
-	select {
-	case <-f.done:
-		// Already closed
-	default:
+	f.stopOnce.Do(func() {
 		close(f.done)
+	})
+}
+
+func (f *TrackForwarder) stopWithError(err error) {
+	f.stopOnce.Do(func() {
+		close(f.done)
+		if err != nil {
+			slog.Warn("Forwarder stopped", "sender_id", f.SenderID, "err", err)
+		}
+		if f.onStop != nil {
+			f.onStop(err)
+		}
+	})
+}
+
+func (f *TrackForwarder) recordWriteError(receiverID string, err error) {
+	now := time.Now()
+	shouldLog := false
+	removeSubscriber := errors.Is(err, io.ErrClosedPipe) || errors.Is(err, webrtc.ErrConnectionClosed)
+
+	f.mu.Lock()
+	last := f.writeErrAt[receiverID]
+	if now.Sub(last) >= 5*time.Second {
+		f.writeErrAt[receiverID] = now
+		shouldLog = true
+	}
+	if removeSubscriber {
+		delete(f.subscribers, receiverID)
+		delete(f.writeErrAt, receiverID)
+	}
+	f.mu.Unlock()
+
+	if shouldLog {
+		slog.Warn("Failed to write RTP to subscriber", "sender_id", f.SenderID, "receiver_id", receiverID, "err", err)
 	}
 }
 
@@ -261,4 +313,12 @@ func (p *Peer) WriteJSON(v any) {
 			slog.Warn("WS write failed", "peer_id", p.ID, "err", err)
 		}
 	}
+}
+
+func (p *Peer) SignalDone() {
+	p.doneOnce.Do(func() {
+		if p.Done != nil {
+			close(p.Done)
+		}
+	})
 }

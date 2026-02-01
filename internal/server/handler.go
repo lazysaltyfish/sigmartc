@@ -21,6 +21,11 @@ import (
 const (
 	maxRoomPeers    = 10
 	maxNicknameRune = 12
+	wsWriteWait     = 5 * time.Second
+	wsPongWait      = 60 * time.Second
+	wsPingInterval  = 30 * time.Second
+	iceRestartDelay = 5 * time.Second
+	iceRestartMin   = 15 * time.Second
 )
 
 var upgrader = websocket.Upgrader{
@@ -31,6 +36,8 @@ type Handler struct {
 	RoomManager *RoomManager
 	// Webrtc API with custom settings if needed
 	WebRTCAPI *webrtc.API
+	// Optional ICE config override (useful for tests).
+	ICEConfig *webrtc.Configuration
 }
 
 func NewHandler(rm *RoomManager, api *webrtc.API) *Handler {
@@ -77,7 +84,34 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 		IP:       ip,
 		Conn:     conn,
 		JoinTime: time.Now(),
+		Done:     make(chan struct{}),
 	}
+
+	conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		return nil
+	})
+	pingTicker := time.NewTicker(wsPingInterval)
+	defer pingTicker.Stop()
+	go func() {
+		for {
+			select {
+			case <-peer.Done:
+				return
+			case <-pingTicker.C:
+				peer.WsMutex.Lock()
+				err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(wsWriteWait))
+				peer.WsMutex.Unlock()
+				if err != nil {
+					slog.Warn("WS ping failed", "peer_id", peer.ID, "err", err)
+					peer.SignalDone()
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
 
 	room := h.RoomManager.GetOrCreateRoom(roomUUID)
 
@@ -96,6 +130,7 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Cleanup on exit
 	defer func() {
+		peer.SignalDone()
 		// Unsubscribe this peer from all forwarders (so they stop sending to this peer)
 		room.ForwardersMu.RLock()
 		for _, forwarder := range room.Forwarders {
@@ -186,6 +221,9 @@ func (h *Handler) setupWebRTC(room *Room, peer *Peer) error {
 			{URLs: []string{"stun:stun.l.google.com:19302"}},
 		},
 	}
+	if h.ICEConfig != nil {
+		config = *h.ICEConfig
+	}
 
 	pc, err := h.WebRTCAPI.NewPeerConnection(config)
 	if err != nil {
@@ -193,6 +231,31 @@ func (h *Handler) setupWebRTC(room *Room, peer *Peer) error {
 		return err
 	}
 	peer.PC = pc
+
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		slog.Info("ICE connection state changed", "peer_id", peer.ID, "state", state.String())
+		switch state {
+		case webrtc.ICEConnectionStateFailed:
+			h.requestICERestart(peer)
+		case webrtc.ICEConnectionStateDisconnected:
+			go func() {
+				select {
+				case <-peer.Done:
+					return
+				case <-time.After(iceRestartDelay):
+				}
+				if peer.PC != nil && peer.PC.ICEConnectionState() == webrtc.ICEConnectionStateDisconnected {
+					h.requestICERestart(peer)
+				}
+			}()
+		}
+	})
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		slog.Info("Peer connection state changed", "peer_id", peer.ID, "state", state.String())
+		if state == webrtc.PeerConnectionStateFailed {
+			h.requestICERestart(peer)
+		}
+	})
 
 	// Handle ICE Candidates
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -212,9 +275,6 @@ func (h *Handler) setupWebRTC(room *Room, peer *Peer) error {
 		}
 
 		slog.Info("Received remote track", "peer", peer.Name, "id", track.ID())
-		room.Lock.Lock()
-		peer.TrackRemote = track
-		room.Lock.Unlock()
 
 		// Broadcast this new track to all other peers in the room
 		h.broadcastTrack(room, peer, track)
@@ -223,33 +283,53 @@ func (h *Handler) setupWebRTC(room *Room, peer *Peer) error {
 }
 
 func (h *Handler) addExistingTracks(room *Room, receiver *Peer) {
-	type senderTrack struct {
-		senderID string
-		track    *webrtc.TrackRemote
+	type forwarderEntry struct {
+		senderID  string
+		forwarder *TrackForwarder
+		track     *webrtc.TrackRemote
 	}
 
-	room.Lock.RLock()
-	var tracks []senderTrack
-	for _, p := range room.Peers {
-		if p.ID == receiver.ID || p.TrackRemote == nil {
+	room.ForwardersMu.RLock()
+	forwarders := make([]forwarderEntry, 0, len(room.Forwarders))
+	for senderID, forwarder := range room.Forwarders {
+		if senderID == receiver.ID || forwarder == nil || forwarder.TrackRemote == nil {
 			continue
 		}
-		tracks = append(tracks, senderTrack{senderID: p.ID, track: p.TrackRemote})
+		forwarders = append(forwarders, forwarderEntry{
+			senderID:  senderID,
+			forwarder: forwarder,
+			track:     forwarder.TrackRemote,
+		})
 	}
-	room.Lock.RUnlock()
+	room.ForwardersMu.RUnlock()
 
-	for _, t := range tracks {
-		h.addTrackToPeer(receiver, t.senderID, t.track, room)
+	for _, entry := range forwarders {
+		h.subscribeToForwarder(receiver, entry.senderID, entry.forwarder, entry.track)
 	}
 }
 
 func (h *Handler) broadcastTrack(room *Room, sender *Peer, track *webrtc.TrackRemote) {
 	// Create a forwarder for this sender's track
 	forwarder := NewTrackForwarder(sender.ID, track)
+	forwarder.onStop = func(err error) {
+		room.ForwardersMu.Lock()
+		current, exists := room.Forwarders[sender.ID]
+		if exists && current == forwarder {
+			delete(room.Forwarders, sender.ID)
+		}
+		room.ForwardersMu.Unlock()
+	}
 
+	var oldForwarder *TrackForwarder
 	room.ForwardersMu.Lock()
+	if existing, exists := room.Forwarders[sender.ID]; exists {
+		oldForwarder = existing
+	}
 	room.Forwarders[sender.ID] = forwarder
 	room.ForwardersMu.Unlock()
+	if oldForwarder != nil && oldForwarder != forwarder {
+		oldForwarder.Stop()
+	}
 
 	// Add the track to all existing peers in the room
 	room.Lock.RLock()
@@ -266,13 +346,8 @@ func (h *Handler) broadcastTrack(room *Room, sender *Peer, track *webrtc.TrackRe
 		h.subscribeToForwarder(receiver, sender.ID, forwarder, track)
 	}
 
-	// Wait for negotiation to stabilize before starting the forwarder
-	// This is done in a goroutine to not block the OnTrack callback
-	go func() {
-		// Give time for all receivers to set up their tracks
-		time.Sleep(100 * time.Millisecond)
-		forwarder.Start()
-	}()
+	// Start forwarding immediately; no fixed sleep.
+	go forwarder.Start()
 }
 
 // subscribeToForwarder creates a local track for the receiver and subscribes it to the forwarder.
@@ -284,20 +359,47 @@ func (h *Handler) subscribeToForwarder(receiver *Peer, senderID string, forwarde
 		return
 	}
 
+	receiver.OutTracksMu.RLock()
+	existingTrack := receiver.OutTracks[senderID]
+	receiver.OutTracksMu.RUnlock()
+	if existingTrack != nil {
+		forwarder.Subscribe(receiver.ID, existingTrack)
+		return
+	}
+
+	// Prevent duplicate outbound tracks for the same (receiver, sender) pair.
+	// This can happen when addExistingTracks() and broadcastTrack() race for a newly joined peer.
+	receiver.OutTracksMu.Lock()
+	if existingTrack := receiver.OutTracks[senderID]; existingTrack != nil {
+		receiver.OutTracksMu.Unlock()
+		forwarder.Subscribe(receiver.ID, existingTrack)
+		return
+	}
+
 	// Create a local track to push data to the receiver
 	// Use senderID as the StreamID so the client can map it to a user
 	trackID := fmt.Sprintf("%s-audio", senderID)
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(track.Codec().RTPCodecCapability, trackID, senderID)
 	if err != nil {
+		receiver.OutTracksMu.Unlock()
 		slog.Error("Failed to create local track", "err", err)
 		return
 	}
 
 	sender, err := receiver.PC.AddTrack(localTrack)
 	if err != nil {
+		receiver.OutTracksMu.Unlock()
 		slog.Error("Failed to add track to PC", "err", err)
 		return
 	}
+
+	// Store the outgoing track for this receiver before unlocking, so concurrent callers can reuse it.
+	if receiver.OutTracks == nil {
+		receiver.OutTracks = make(map[string]*webrtc.TrackLocalStaticRTP)
+	}
+	receiver.OutTracks[senderID] = localTrack
+	receiver.OutTracksMu.Unlock()
+
 	go func() {
 		rtcpBuf := make([]byte, 1500)
 		for {
@@ -307,14 +409,6 @@ func (h *Handler) subscribeToForwarder(receiver *Peer, senderID string, forwarde
 		}
 	}()
 
-	// Store the outgoing track for this receiver
-	receiver.OutTracksMu.Lock()
-	if receiver.OutTracks == nil {
-		receiver.OutTracks = make(map[string]*webrtc.TrackLocalStaticRTP)
-	}
-	receiver.OutTracks[senderID] = localTrack
-	receiver.OutTracksMu.Unlock()
-
 	// Subscribe to the forwarder
 	forwarder.Subscribe(receiver.ID, localTrack)
 
@@ -322,24 +416,25 @@ func (h *Handler) subscribeToForwarder(receiver *Peer, senderID string, forwarde
 	h.requestNegotiation(receiver)
 }
 
-func (h *Handler) addTrackToPeer(receiver *Peer, senderID string, track *webrtc.TrackRemote, room *Room) {
-	// Get the forwarder for this sender
-	room.ForwardersMu.RLock()
-	forwarder, exists := room.Forwarders[senderID]
-	room.ForwardersMu.RUnlock()
-
-	if !exists {
-		// The sender doesn't have a forwarder yet, which means they haven't started sending.
-		// This shouldn't happen in normal flow but handle it gracefully.
-		slog.Warn("Forwarder not found for sender", "senderID", senderID)
-		return
-	}
-
-	h.subscribeToForwarder(receiver, senderID, forwarder, track)
+func (h *Handler) requestNegotiation(peer *Peer) {
+	h.requestNegotiationWithICE(peer, false)
 }
 
-func (h *Handler) requestNegotiation(peer *Peer) {
+func (h *Handler) requestICERestart(peer *Peer) {
+	h.requestNegotiationWithICE(peer, true)
+}
+
+func (h *Handler) requestNegotiationWithICE(peer *Peer, iceRestart bool) {
 	peer.NegotiationMu.Lock()
+	if iceRestart {
+		now := time.Now()
+		if !peer.LastIceRestart.IsZero() && now.Sub(peer.LastIceRestart) < iceRestartMin {
+			peer.NegotiationMu.Unlock()
+			return
+		}
+		peer.LastIceRestart = now
+		peer.IceRestartPending = true
+	}
 	peer.NegotiationPending = true
 	if peer.NegotiationInProgress {
 		peer.NegotiationMu.Unlock()
@@ -359,8 +454,15 @@ func (h *Handler) runNegotiation(peer *Peer) {
 	}()
 
 	for {
+		select {
+		case <-peer.Done:
+			return
+		default:
+		}
+
 		peer.NegotiationMu.Lock()
 		pending := peer.NegotiationPending
+		iceRestart := peer.IceRestartPending
 		peer.NegotiationMu.Unlock()
 		if !pending {
 			return
@@ -370,6 +472,14 @@ func (h *Handler) runNegotiation(peer *Peer) {
 		if pc == nil {
 			peer.NegotiationMu.Lock()
 			peer.NegotiationPending = false
+			peer.IceRestartPending = false
+			peer.NegotiationMu.Unlock()
+			return
+		}
+		if pc.ConnectionState() == webrtc.PeerConnectionStateClosed || pc.SignalingState() == webrtc.SignalingStateClosed {
+			peer.NegotiationMu.Lock()
+			peer.NegotiationPending = false
+			peer.IceRestartPending = false
 			peer.NegotiationMu.Unlock()
 			return
 		}
@@ -384,7 +494,11 @@ func (h *Handler) runNegotiation(peer *Peer) {
 		peer.MakingOffer = true
 		peer.NegotiationMu.Unlock()
 
-		offer, err := pc.CreateOffer(nil)
+		var opts *webrtc.OfferOptions
+		if iceRestart {
+			opts = &webrtc.OfferOptions{ICERestart: true}
+		}
+		offer, err := pc.CreateOffer(opts)
 		if err == nil {
 			err = pc.SetLocalDescription(offer)
 		}
@@ -393,6 +507,8 @@ func (h *Handler) runNegotiation(peer *Peer) {
 		peer.MakingOffer = false
 		if err != nil {
 			peer.NegotiationPending = true
+		} else {
+			peer.IceRestartPending = false
 		}
 		peer.NegotiationMu.Unlock()
 
@@ -458,12 +574,23 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 
 	switch t {
 	case "offer":
+		state := peer.PC.SignalingState()
 		peer.NegotiationMu.Lock()
-		offerCollision := peer.MakingOffer || peer.PC.SignalingState() != webrtc.SignalingStateStable
-		peer.NegotiationMu.Unlock()
+		offerCollision := peer.MakingOffer || state == webrtc.SignalingStateHaveLocalOffer
 		if offerCollision {
-			slog.Info("Ignoring offer due to collision", "peer_id", peer.ID)
+			peer.NegotiationPending = true
+			peer.MakingOffer = false
+		}
+		peer.NegotiationMu.Unlock()
+		if state == webrtc.SignalingStateHaveRemoteOffer {
+			slog.Warn("Dropping offer while remote offer pending", "peer_id", peer.ID)
 			return
+		}
+		if state == webrtc.SignalingStateHaveLocalOffer {
+			if err := peer.PC.SetLocalDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeRollback}); err != nil {
+				slog.Warn("Rollback failed", "peer_id", peer.ID, "err", err)
+				return
+			}
 		}
 
 		sdp, _ := msg["sdp"].(string)
@@ -487,6 +614,9 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 			"type": "answer",
 			"sdp":  answer.SDP,
 		})
+		if offerCollision {
+			h.requestNegotiation(peer)
+		}
 
 	case "answer":
 		sdp, _ := msg["sdp"].(string)

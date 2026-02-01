@@ -80,7 +80,7 @@ let testToneContext;
 let pc;
 let ws;
 let myId;
-let peers = new Map(); // peerId -> { name, volumePercent, gainNode, audioEl, sourceNode }
+let peers = new Map(); // peerId -> { name, volumePercent, gainNode, audioEl, sourceNode, stream }
 let isMuted = false;
 let mixerOpen = false;
 let localName = '';
@@ -95,6 +95,10 @@ let makingOffer = false;
 let ignoreOffer = false;
 const isPolite = true;
 let pendingIceCandidates = [];
+let iceRestartTimer = null;
+let lastIceRestartAt = 0;
+const ICE_RESTART_COOLDOWN = 15000;
+const ICE_RESTART_DISCONNECTED_DELAY = 4000;
 
 const joinView = document.getElementById('join-view');
 const roomView = document.getElementById('room-view');
@@ -278,6 +282,10 @@ function cleanupSession({ redirect, showJoin }) {
         netStatsManager.stop();
         netStatsManager = null;
     }
+    if (iceRestartTimer) {
+        clearTimeout(iceRestartTimer);
+        iceRestartTimer = null;
+    }
 
     // 1. Close WebRTC
     if (pc) {
@@ -322,6 +330,7 @@ function cleanupSession({ redirect, showJoin }) {
     myId = null;
     makingOffer = false;
     ignoreOffer = false;
+    lastIceRestartAt = 0;
 
     if (userList) userList.innerHTML = '';
     if (avatarGrid) avatarGrid.innerHTML = '';
@@ -994,6 +1003,11 @@ function initWebRTC() {
     makingOffer = false;
     ignoreOffer = false;
     pendingIceCandidates = [];
+    if (window.__E2E__) {
+        window.__pc = pc;
+        window.__getPeerCount = () => peers.size;
+        window.__getMyId = () => myId;
+    }
 
     // Start network stats manager immediately
     if (!netStatsManager) {
@@ -1004,6 +1018,20 @@ function initWebRTC() {
     pc.onicecandidate = (e) => {
         if (e.candidate) {
             ws.send(JSON.stringify({ type: 'candidate', candidate: e.candidate }));
+        }
+    };
+    pc.oniceconnectionstatechange = () => {
+        if (!pc) return;
+        if (pc.iceConnectionState === 'failed') {
+            scheduleIceRestart('ice-failed', 0);
+        } else if (pc.iceConnectionState === 'disconnected') {
+            scheduleIceRestart('ice-disconnected', ICE_RESTART_DISCONNECTED_DELAY);
+        }
+    };
+    pc.onconnectionstatechange = () => {
+        if (!pc) return;
+        if (pc.connectionState === 'failed') {
+            scheduleIceRestart('pc-failed', 0);
         }
     };
 
@@ -1075,6 +1103,39 @@ function initWebRTC() {
             makingOffer = false;
         }
     });
+}
+
+function scheduleIceRestart(reason, delayMs) {
+    if (isTestMode) return;
+    if (!pc || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const now = Date.now();
+    if (now - lastIceRestartAt < ICE_RESTART_COOLDOWN) return;
+    if (iceRestartTimer) {
+        clearTimeout(iceRestartTimer);
+    }
+    const delay = Number.isFinite(delayMs) ? delayMs : 0;
+    iceRestartTimer = setTimeout(async () => {
+        iceRestartTimer = null;
+        if (!pc || pc.signalingState === 'closed') return;
+        if (Date.now() - lastIceRestartAt < ICE_RESTART_COOLDOWN) return;
+        if (reason === 'ice-disconnected' && pc.iceConnectionState !== 'disconnected') {
+            return;
+        }
+        if (pc.signalingState !== 'stable' || makingOffer) {
+            return;
+        }
+        try {
+            makingOffer = true;
+            const offer = await pc.createOffer({ iceRestart: true });
+            await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+            lastIceRestartAt = Date.now();
+        } catch (e) {
+            console.warn('ICE restart failed:', e);
+        } finally {
+            makingOffer = false;
+        }
+    }, delay);
 }
 
 // 4. UI Helpers
@@ -1203,22 +1264,53 @@ function attachRemoteAudio(peerId, stream, audioEl) {
     }
 
     peer.audioEl = audioEl;
-    if (peer.sourceNode || peer.gainNode) {
-        return;
+    const ctx = getRemoteAudioContext();
+
+    // If this peer already has an audio graph, rebind the source if the MediaStream instance changes.
+    // This avoids silent playback if duplicate tracks / renegotiation produce a new MediaStream for the same peerId.
+    if (peer.gainNode) {
+        if (peer.stream === stream && peer.sourceNode) {
+            return;
+        }
+        try {
+            peer.sourceNode?.disconnect();
+        } catch (e) {
+            // Best-effort: some browsers throw if a node is already disconnected.
+        }
+        try {
+            const source = ctx.createMediaStreamSource(stream);
+            source.connect(peer.gainNode);
+            peer.sourceNode = source;
+            peer.stream = stream;
+            return;
+        } catch (e) {
+            console.warn('Failed to rebind remote audio stream:', e);
+            // Fallback: allow the <audio> element to output sound.
+            audioEl.volume = 1;
+            peer.stream = stream;
+            return;
+        }
     }
 
-    const ctx = getRemoteAudioContext();
-    const source = ctx.createMediaStreamSource(stream);
-    const gainNode = ctx.createGain();
-    const percent = peer.volumePercent ?? 100;
-    gainNode.gain.value = percentToGain(percent);
-    source.connect(gainNode).connect(ctx.destination);
+    try {
+        const source = ctx.createMediaStreamSource(stream);
+        const gainNode = ctx.createGain();
+        const percent = peer.volumePercent ?? 100;
+        gainNode.gain.value = percentToGain(percent);
+        source.connect(gainNode).connect(ctx.destination);
 
-    peer.sourceNode = source;
-    peer.gainNode = gainNode;
+        peer.sourceNode = source;
+        peer.gainNode = gainNode;
+        peer.stream = stream;
+    } catch (e) {
+        console.warn('Failed to attach remote audio via WebAudio:', e);
+        // Fallback: allow the <audio> element to output sound.
+        audioEl.volume = 1;
+        peer.stream = stream;
+    }
 
-    if (audioDebug) {
-        audioDebug.peerGains[peerId] = gainNode.gain.value;
+    if (audioDebug && peer.gainNode) {
+        audioDebug.peerGains[peerId] = peer.gainNode.gain.value;
     }
 }
 
@@ -1231,6 +1323,7 @@ function cleanupPeerAudio(peerId) {
     peer.sourceNode = null;
     peer.gainNode = null;
     peer.audioEl = null;
+    peer.stream = null;
 }
 
 function setupVAD(stream, peerId, displayName, isSelf) {
