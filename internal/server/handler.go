@@ -40,7 +40,7 @@ type Handler struct {
 	ICEConfig *webrtc.Configuration
 }
 
-func NewHandler(rm *RoomManager, api *webrtc.API) *Handler {
+func NewHandler(rm *RoomManager, api *webrtc.API, iceConfig *webrtc.Configuration) *Handler {
 	if api == nil {
 		m := &webrtc.MediaEngine{}
 		if err := m.RegisterDefaultCodecs(); err != nil {
@@ -53,6 +53,7 @@ func NewHandler(rm *RoomManager, api *webrtc.API) *Handler {
 	return &Handler{
 		RoomManager: rm,
 		WebRTCAPI:   api,
+		ICEConfig:   iceConfig,
 	}
 }
 

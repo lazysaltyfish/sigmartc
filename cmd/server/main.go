@@ -23,6 +23,9 @@ func main() {
 	port := flag.Int("port", 8080, "HTTP Port")
 	adminKey := flag.String("admin-key", "change-me-123", "Admin panel secret key")
 	rtcUDPPort := flag.Int("rtc-udp-port", 50000, "WebRTC ICE UDP port")
+	turnServer := flag.String("turn-server", "", "TURN server URL (e.g., turn:your-server.com:3478)")
+	turnUser := flag.String("turn-user", "", "TURN server username")
+	turnPass := flag.String("turn-pass", "", "TURN server password")
 	flag.Parse()
 
 	// 1. Initialize Logger
@@ -63,7 +66,23 @@ func main() {
 
 	slog.Info("ICE UDP mux enabled", "port", *rtcUDPPort)
 
-	h := server.NewHandler(rm, api)
+	// Build ICE configuration
+	iceConfig := &webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
+		},
+	}
+	if *turnServer != "" {
+		iceConfig.ICEServers = append(iceConfig.ICEServers, webrtc.ICEServer{
+			URLs:           []string{*turnServer},
+			Username:       *turnUser,
+			Credential:     *turnPass,
+			CredentialType: webrtc.ICECredentialTypePassword,
+		})
+		slog.Info("TURN server configured", "server", *turnServer)
+	}
+
+	h := server.NewHandler(rm, api, iceConfig)
 
 	// 4. Routing
 	mux := http.NewServeMux()
@@ -88,9 +107,15 @@ func main() {
 			}
 			
 			data := struct {
-				Version string
+				Version   string
+				ICEServer string
+				ICEUser   string
+				ICEPass   string
 			}{
-				Version: Version,
+				Version:   Version,
+				ICEServer: *turnServer,
+				ICEUser:   *turnUser,
+				ICEPass:   *turnPass,
 			}
 
 			if err := tmpl.Execute(w, data); err != nil {

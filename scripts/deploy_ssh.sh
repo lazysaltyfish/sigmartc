@@ -11,6 +11,9 @@ Environment variables:
   NETWORK_MODE   host|bridge (default: bridge)
   UDP_PORT       WebRTC UDP port (container + publish when NETWORK_MODE=bridge) (default: 50000)
   HTTP_BIND_HOST Host IP for HTTP port binding when NETWORK_MODE=bridge (default: 127.0.0.1)
+  TURN_SERVER    TURN server URL (e.g., turn:1.2.3.4:3478)
+  TURN_USER      TURN server username
+  TURN_PASS      TURN server password
   IMAGE_NAME     Docker image name (default: sigmartc)
   CONTAINER_NAME Docker container name (default: sigmartc)
   SSH_OPTS       Extra options for ssh (e.g. "-i ~/.ssh/id_rsa")
@@ -19,6 +22,7 @@ Examples:
   ADMIN_KEY=secret PORT=8080 ./scripts/deploy_ssh.sh root@example.com
   NETWORK_MODE=bridge UDP_PORT=50000 ./scripts/deploy_ssh.sh ubuntu@1.2.3.4 /opt/sigmartc
   NETWORK_MODE=bridge HTTP_BIND_HOST=0.0.0.0 ./scripts/deploy_ssh.sh ubuntu@1.2.3.4 /opt/sigmartc
+  TURN_SERVER=turn:1.2.3.4:3478 TURN_USER=user TURN_PASS=pass ./scripts/deploy_ssh.sh ubuntu@1.2.3.4
 USAGE
 }
 
@@ -40,6 +44,9 @@ PORT="${PORT:-8080}"
 NETWORK_MODE="${NETWORK_MODE:-bridge}"
 UDP_PORT="${UDP_PORT:-50000}"
 HTTP_BIND_HOST="${HTTP_BIND_HOST:-127.0.0.1}"
+TURN_SERVER="${TURN_SERVER:-}"
+TURN_USER="${TURN_USER:-}"
+TURN_PASS="${TURN_PASS:-}"
 IMAGE_NAME="${IMAGE_NAME:-sigmartc}"
 CONTAINER_NAME="${CONTAINER_NAME:-sigmartc}"
 SSH_OPTS="${SSH_OPTS:-}"
@@ -77,7 +84,7 @@ docker build --build-arg VERSION="$VERSION" -t "$image" "$context_dir"
 EOF
 
 ssh $SSH_OPTS "$TARGET" bash -s -- \
-  "$IMAGE_NAME" "$CONTAINER_NAME" "$PORT" "$ADMIN_KEY" "$NETWORK_MODE" "$UDP_PORT" "$HTTP_BIND_HOST" "$REMOTE_DATA" <<'EOF'
+  "$IMAGE_NAME" "$CONTAINER_NAME" "$PORT" "$ADMIN_KEY" "$NETWORK_MODE" "$UDP_PORT" "$HTTP_BIND_HOST" "$REMOTE_DATA" "$TURN_SERVER" "$TURN_USER" "$TURN_PASS" <<'EOF'
 set -euo pipefail
 image="$1"
 container="$2"
@@ -87,6 +94,9 @@ network_mode="$5"
 udp_port="$6"
 http_bind_host="${7-}"
 data_dir="${8-}"
+turn_server="${9-}"
+turn_user="${10-}"
+turn_pass="${11-}"
 if [[ -z "$data_dir" ]]; then
   data_dir="$http_bind_host"
   http_bind_host=""
@@ -104,6 +114,16 @@ run_args=(
   -e DATA_DIR=/data
   -v "$data_dir:/data"
 )
+
+if [[ -n "$turn_server" ]]; then
+  run_args+=(-e TURN_SERVER="$turn_server")
+fi
+if [[ -n "$turn_user" ]]; then
+  run_args+=(-e TURN_USER="$turn_user")
+fi
+if [[ -n "$turn_pass" ]]; then
+  run_args+=(-e TURN_PASS="$turn_pass")
+fi
 
 if [[ "$network_mode" == "host" ]]; then
   run_args+=(--network host)

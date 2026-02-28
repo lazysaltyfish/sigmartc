@@ -21,7 +21,7 @@ needed hygiene work (runtime artifacts, missing gitignore, and missing user docs
 ### Networking and Security
 - `X-Forwarded-For` is trusted directly. This is safe only behind a trusted
   reverse proxy that overwrites/cleans the header.
-- Only STUN is configured; no TURN fallback.
+- STUN is configured by default; TURN relay is supported via command-line flags.
 
 ### Test Coverage
 - No automated tests. The manual verification checklist is the primary validation.
@@ -37,7 +37,6 @@ needed hygiene work (runtime artifacts, missing gitignore, and missing user docs
 - Consider replacing the bundled Go tarball with an official builder image to
   reduce repo size.
 - Add a small smoke-test script for CI (HTTP + WS checks).
-- Evaluate TURN support for strict NAT clients.
 
 ## Notes
 - The StreamID mapping (sender PeerID) is critical for frontend UI mapping.

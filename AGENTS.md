@@ -15,6 +15,7 @@
 *   **Core Logic:** `internal/server/`
 *   **WebRTC Library:** `github.com/pion/webrtc/v3`
 *   **Signaling:** `github.com/gorilla/websocket`
+*   **ICE Configuration:** STUN + optional TURN relay for NAT traversal
 *   **Networking:**
     *   **TCP 8080 (Default):** HTTP (UI) + WebSocket (Signaling). Usually reverse-proxied via Nginx/Caddy to Port 443 (HTTPS).
     *   **UDP 50000:** Single-port WebRTC media traffic (RTP/RTCP).
@@ -59,9 +60,25 @@
 # Build
 go build -o bin/sigmartc cmd/server/main.go
 
-# Run
+# Run (basic)
 ./bin/sigmartc -port 8080 -admin-key "my-secret-key"
+
+# Run (with TURN server for NAT traversal)
+./bin/sigmartc -port 8080 -admin-key "my-secret-key" \
+  -turn-server turn:your-server:3478 \
+  -turn-user username \
+  -turn-pass password
 ```
+
+**Command-line flags:**
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-port` | 8080 | HTTP port |
+| `-admin-key` | change-me-123 | Admin panel secret |
+| `-rtc-udp-port` | 50000 | WebRTC UDP port |
+| `-turn-server` | - | TURN server URL |
+| `-turn-user` | - | TURN username |
+| `-turn-pass` | - | TURN password |
 
 ### 4.2 Admin Interface
 *   **URL:** `/admin?key=my-secret-key`
@@ -118,8 +135,8 @@ Since this is a real-time networked application, automated unit tests are limite
 7.  **Admin:** Access `/admin?key=...`. Ban Tab A's IP. Try to rejoin. Verify 403 Forbidden.
 
 ## 7. Future Roadmap (For AI Agents)
+*   ✅ **TURN Server:** Integrated TURN credentials for users behind strict NATs.
 *   **Screen Sharing:** Add video track support to the SFU logic.
-*   **Turn Server:** Integrate TURN credentials for users behind strict NATs.
 *   **Chat:** Add a simple DataChannel text chat.
 *   **Mobile UI:** Improve CSS for vertical mobile layouts.
 
