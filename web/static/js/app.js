@@ -151,6 +151,41 @@ const ICE_RESTART_COOLDOWN = 15000;
 const ICE_RESTART_DISCONNECTED_DELAY = 4000;
 const AUDIO_RECOVERY_CHECK_DELAY = 2000;
 
+// --- Wake Lock Manager (keeps screen on during call) ---
+let wakeLock = null;
+
+async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) {
+        Logger.debug('Wake Lock API not supported');
+        return;
+    }
+    try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        Logger.info('Wake Lock acquired - screen will stay on');
+        wakeLock.addEventListener('release', () => {
+            Logger.debug('Wake Lock released');
+        });
+    } catch (err) {
+        Logger.warn('Wake Lock request failed:', err.message);
+    }
+}
+
+async function releaseWakeLock() {
+    if (wakeLock) {
+        await wakeLock.release();
+        wakeLock = null;
+        Logger.debug('Wake Lock released manually');
+    }
+}
+
+// Re-acquire wake lock when page becomes visible again
+document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && !roomView.classList.contains('hidden')) {
+        Logger.debug('Page visible again, re-acquiring wake lock');
+        await requestWakeLock();
+    }
+});
+
 const joinView = document.getElementById('join-view');
 const roomView = document.getElementById('room-view');
 const userList = document.getElementById('user-list');
@@ -334,6 +369,9 @@ function cleanupSession({ redirect, showJoin }) {
     Logger.info('Cleaning up session');
     didCleanup = true;
 
+    // Release screen wake lock
+    releaseWakeLock();
+
     if (netStatsManager) {
         netStatsManager.stop();
         netStatsManager = null;
@@ -469,6 +507,9 @@ function handleJoin(name, rawStream) {
     queueSelfVAD(localStream, name);
     setMixerOpen(!isMobilePortrait());
     syncMixerForViewport();
+
+    // Keep screen on during call
+    requestWakeLock();
 
     if (isTestMode) {
         Logger.info('Test mode enabled, skipping signaling');
