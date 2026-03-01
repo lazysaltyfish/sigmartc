@@ -109,6 +109,24 @@
                                 </div>
                                 <div id="input-help" class="mixer-help"></div>
                             </div>
+                            <div class="mixer-section">
+                                <div class="mixer-title">降噪设置</div>
+                                <div class="mixer-row mixer-row-toggle">
+                                    <span class="mixer-label">回声消除</span>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="echo-cancellation" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="mixer-row mixer-row-toggle">
+                                    <span class="mixer-label">噪声抑制</span>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="noise-suppression" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div id="noise-help" class="mixer-help"></div>
+                            </div>
                         </div>
                         <div class="mixer-peers">
                             <div class="mixer-section">
@@ -121,6 +139,7 @@
                 </div>
                 <div class="footer">
                     <button id="btn-copy">复制邀请链接</button>
+                    <span class="version-info" title="构建时间: {{.BuildTime}}">v{{.Version}}</span>
                 </div>
             </div>
         </div>
@@ -129,18 +148,7 @@
     <!-- Audio elements will be managed dynamically by JS -->
     <div id="audio-container" class="audio-container" aria-hidden="true"></div>
 
-    <script>
-        window.ICE_CONFIG = {
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-            {{if .ICEServer}}
-            .concat([{
-                urls: '{{.ICEServer}}',
-                username: '{{.ICEUser}}',
-                credential: '{{.ICEPass}}'
-            }])
-            {{end}}
-        };
-    </script>
+    <script src="/static/js/config.js?v={{.Version}}"></script>
     <script src="/static/js/audio_controls.js?v={{.Version}}"></script>
     <script src="/static/js/app.js?v={{.Version}}"></script>
 </body>

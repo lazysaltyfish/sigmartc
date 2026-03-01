@@ -25,6 +25,9 @@ type Peer struct {
 
 	PC *webrtc.PeerConnection
 
+	// Heartbeat channel for keepalive
+	HeartbeatDC *webrtc.DataChannel
+
 	// OutTracks maps senderID to the local track used to forward that sender's audio to this peer
 	OutTracks   map[string]*webrtc.TrackLocalStaticRTP
 	OutTracksMu sync.RWMutex

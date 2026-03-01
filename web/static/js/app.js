@@ -1,3 +1,49 @@
+// Logger utility
+const Logger = {
+    levels: { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 },
+    level: 0, // DEBUG always enabled
+    enabled: true,
+    prefix: '[SigmaRTC]',
+
+    _format(level, args) {
+        const timestamp = new Date().toISOString().substr(11, 12);
+        const prefix = `${timestamp} ${this.prefix} [${level}]`;
+        return [prefix, ...args];
+    },
+
+    debug(...args) {
+        if (this.enabled && this.level <= this.levels.DEBUG) {
+            console.debug(...this._format('DEBUG', args));
+        }
+    },
+
+    info(...args) {
+        if (this.enabled && this.level <= this.levels.INFO) {
+            console.info(...this._format('INFO', args));
+        }
+    },
+
+    warn(...args) {
+        if (this.enabled && this.level <= this.levels.WARN) {
+            console.warn(...this._format('WARN', args));
+        }
+    },
+
+    error(...args) {
+        if (this.enabled && this.level <= this.levels.ERROR) {
+            console.error(...this._format('ERROR', args));
+        }
+    },
+
+    group(label) {
+        if (this.enabled) console.group(label);
+    },
+
+    groupEnd() {
+        if (this.enabled) console.groupEnd();
+    }
+};
+
 const config = window.ICE_CONFIG || {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
 };
@@ -86,6 +132,8 @@ let mixerOpen = false;
 let localName = '';
 let isLeaving = false;
 let notifiedDisconnect = false;
+let noiseSuppressionEnabled = true;
+let echoCancellationEnabled = true;
 let didCleanup = false;
 let isUnloading = false;
 let vadAudioContext;
@@ -97,8 +145,11 @@ const isPolite = true;
 let pendingIceCandidates = [];
 let iceRestartTimer = null;
 let lastIceRestartAt = 0;
+let previousIceState = '';
+let audioRecoveryCheckTimer = null;
 const ICE_RESTART_COOLDOWN = 15000;
 const ICE_RESTART_DISCONNECTED_DELAY = 4000;
+const AUDIO_RECOVERY_CHECK_DELAY = 2000;
 
 const joinView = document.getElementById('join-view');
 const roomView = document.getElementById('room-view');
@@ -204,7 +255,7 @@ class NetworkStatsManager {
             this._updateUI(rtt, lossRate);
 
         } catch (e) {
-            console.warn('Failed to get stats:', e);
+            Logger.warn('Failed to get stats:', e);
         }
     }
 
@@ -238,7 +289,7 @@ let netStatsManager = null;
 
 // 1. Initialize URL and View
 const path = window.location.pathname;
-let roomUUID = path.startsWith('/r/') ? path.substring(3) : '';
+let roomUUID = path.startsWith('/r/') ? decodeURIComponent(path.substring(3)) : '';
 if (!roomUUID) {
     roomUUID = Math.random().toString(36).substring(2, 10);
     window.history.replaceState(null, '', `/r/${roomUUID}`);
@@ -269,13 +320,18 @@ document.getElementById('btn-leave').onclick = () => {
 
 function leaveRoom() {
     if (isLeaving) return;
+    Logger.info('Leaving room');
     isLeaving = true;
     notifiedDisconnect = true;
     cleanupSession({ redirect: false, showJoin: true });
 }
 
 function cleanupSession({ redirect, showJoin }) {
-    if (didCleanup) return;
+    if (didCleanup) {
+        Logger.debug('cleanupSession already done, skipping');
+        return;
+    }
+    Logger.info('Cleaning up session');
     didCleanup = true;
 
     if (netStatsManager) {
@@ -286,19 +342,26 @@ function cleanupSession({ redirect, showJoin }) {
         clearTimeout(iceRestartTimer);
         iceRestartTimer = null;
     }
+    if (audioRecoveryCheckTimer) {
+        clearTimeout(audioRecoveryCheckTimer);
+        audioRecoveryCheckTimer = null;
+    }
 
     // 1. Close WebRTC
     if (pc) {
+        Logger.debug('Closing RTCPeerConnection');
         pc.close();
         pc = null;
     }
     // 2. Close WebSocket
     if (ws) {
+        Logger.debug('Closing WebSocket');
         ws.close();
         ws = null;
     }
     // 3. Stop Local Media (Microphone)
     if (localStream) {
+        Logger.debug('Stopping local stream tracks');
         localStream.getTracks().forEach(track => track.stop());
         localStream = null;
     }
@@ -324,6 +387,7 @@ function cleanupSession({ redirect, showJoin }) {
         vadAudioContext = null;
     }
     pendingSelfVAD = null;
+    Logger.debug('Cleaning up peer audio, peer count:', peers.size);
     peers.forEach((_, id) => cleanupPeerAudio(id));
     peers.clear();
     setMixerOpen(false);
@@ -339,11 +403,13 @@ function cleanupSession({ redirect, showJoin }) {
     updatePeerVolumeEmptyState();
 
     if (redirect) {
+        Logger.info('Redirecting to home');
         window.location.href = '/';
         return;
     }
 
     if (showJoin) {
+        Logger.debug('Showing join view');
         joinView.classList.remove('hidden');
         roomView.classList.add('hidden');
     }
@@ -376,8 +442,10 @@ document.getElementById('btn-copy').onclick = () => {
 
 initPlaybackDevices();
 initInputDevices();
+initNoiseSuppressionControls();
 
 function handleJoin(name, rawStream) {
+    Logger.info('Joining room as:', name);
     localName = name;
     didCleanup = false;
     isUnloading = false;
@@ -403,6 +471,7 @@ function handleJoin(name, rawStream) {
     syncMixerForViewport();
 
     if (isTestMode) {
+        Logger.info('Test mode enabled, skipping signaling');
         seedTestPeers();
         return;
     }
@@ -441,16 +510,19 @@ window.addEventListener('pagehide', () => {
 });
 
 function setupLocalAudio(rawStream) {
+    Logger.debug('Setting up local audio');
     localAudioContext = new (window.AudioContext || window.webkitAudioContext)();
     const source = localAudioContext.createMediaStreamSource(rawStream);
     localGainNode = localAudioContext.createGain();
     localGainNode.gain.value = percentToGain(micGainInput?.value ?? 100);
     const destination = localAudioContext.createMediaStreamDestination();
     source.connect(localGainNode).connect(destination);
+    Logger.debug('Local audio setup complete, gain:', localGainNode.gain.value);
     return destination.stream;
 }
 
 function createTestToneStream() {
+    Logger.debug('Creating test tone stream');
     testToneContext = new (window.AudioContext || window.webkitAudioContext)();
     const oscillator = testToneContext.createOscillator();
     const gain = testToneContext.createGain();
@@ -462,6 +534,7 @@ function createTestToneStream() {
 }
 
 function resumeAudioContexts() {
+    Logger.debug('Resuming audio contexts, local:', localAudioContext?.state, 'remote:', remoteAudioContext?.state);
     if (localAudioContext && localAudioContext.state === 'suspended') {
         localAudioContext.resume();
     }
@@ -523,8 +596,15 @@ function persistPreferredInputDevice() {
 }
 
 function buildAudioConstraints(deviceId) {
-    if (!deviceId || deviceId === 'default') return true;
-    return { deviceId: { exact: deviceId } };
+    const constraints = {
+        echoCancellation: echoCancellationEnabled,
+        noiseSuppression: noiseSuppressionEnabled,
+        autoGainControl: true
+    };
+    if (deviceId && deviceId !== 'default') {
+        constraints.deviceId = { exact: deviceId };
+    }
+    return constraints;
 }
 
 function applyOutputDeviceToContext(deviceId) {
@@ -724,6 +804,67 @@ function initInputDevices() {
     refreshInputDevices();
 }
 
+function initNoiseSuppressionControls() {
+    const echoCancelInput = document.getElementById('echo-cancellation');
+    const noiseSuppressInput = document.getElementById('noise-suppression');
+    const noiseHelp = document.getElementById('noise-help');
+
+    // Check browser support
+    const supported = navigator.mediaDevices?.getSupportedConstraints?.() || {};
+
+    // Load saved settings
+    try {
+        const savedEcho = localStorage.getItem('echoCancellation');
+        const savedNoise = localStorage.getItem('noiseSuppression');
+        if (savedEcho !== null) echoCancellationEnabled = savedEcho === 'true';
+        if (savedNoise !== null) noiseSuppressionEnabled = savedNoise === 'true';
+    } catch (e) {
+        // Ignore storage access issues
+    }
+
+    // Bind events
+    if (echoCancelInput) {
+        echoCancelInput.checked = echoCancellationEnabled;
+        echoCancelInput.disabled = !supported.echoCancellation;
+        echoCancelInput.addEventListener('change', () => {
+            echoCancellationEnabled = echoCancelInput.checked;
+            localStorage.setItem('echoCancellation', echoCancellationEnabled);
+            applyNoiseSettingsToCurrentStream();
+        });
+    }
+
+    if (noiseSuppressInput) {
+        noiseSuppressInput.checked = noiseSuppressionEnabled;
+        noiseSuppressInput.disabled = !supported.noiseSuppression;
+        noiseSuppressInput.addEventListener('change', () => {
+            noiseSuppressionEnabled = noiseSuppressInput.checked;
+            localStorage.setItem('noiseSuppression', noiseSuppressionEnabled);
+            applyNoiseSettingsToCurrentStream();
+        });
+    }
+
+    // Show unsupported message
+    if (noiseHelp && !supported.noiseSuppression) {
+        noiseHelp.textContent = '当前浏览器不支持硬件噪声抑制';
+    }
+}
+
+async function applyNoiseSettingsToCurrentStream() {
+    if (!localRawStream || isLeaving) return;
+    const track = localRawStream.getAudioTracks()[0];
+    if (!track?.applyConstraints) return;
+
+    try {
+        await track.applyConstraints({
+            echoCancellation: echoCancellationEnabled,
+            noiseSuppression: noiseSuppressionEnabled,
+            autoGainControl: true
+        });
+    } catch (e) {
+        Logger.warn('Failed to apply noise constraints:', e);
+    }
+}
+
 async function switchInputDevice(deviceId) {
     if (isTestMode) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -804,6 +945,7 @@ function syncMixerForViewport() {
 
 function setMicGain(percent) {
     const clamped = clampPercent(percent);
+    Logger.debug('Setting mic gain:', clamped + '%');
     if (micGainInput) micGainInput.value = clamped;
     if (micGainValue) micGainValue.textContent = `${clamped}%`;
     if (localGainNode) {
@@ -899,9 +1041,16 @@ function seedTestPeers() {
 // 3. Signaling & WebRTC
 function startSignaling(name) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${window.location.host}/ws?room=${roomUUID}&name=${encodeURIComponent(name)}`);
+    const wsUrl = `${protocol}//${window.location.host}/ws?room=${encodeURIComponent(roomUUID)}&name=${encodeURIComponent(name)}`;
+    Logger.info('Connecting to signaling server:', wsUrl);
+    ws = new WebSocket(wsUrl);
 
-    ws.onclose = () => {
+    ws.onopen = () => {
+        Logger.info('WebSocket connected');
+    };
+
+    ws.onclose = (e) => {
+        Logger.info('WebSocket closed, code:', e.code, 'reason:', e.reason);
         if (isUnloading || document.visibilityState !== 'visible') {
             return;
         }
@@ -909,7 +1058,8 @@ function startSignaling(name) {
             handleSocketFailure('连接已断开');
         }
     };
-    ws.onerror = () => {
+    ws.onerror = (e) => {
+        Logger.error('WebSocket error:', e);
         if (isUnloading || document.visibilityState !== 'visible') {
             return;
         }
@@ -920,48 +1070,60 @@ function startSignaling(name) {
 
     ws.onmessage = async (e) => {
         const msg = JSON.parse(e.data);
+        Logger.debug('Received message:', msg.type, msg);
         switch (msg.type) {
             case 'room_state':
                 myId = msg.self_id;
+                Logger.info('Room state received, myId:', myId, 'peers:', msg.peers.length);
                 maybeStartSelfVAD();
                 msg.peers.forEach(p => addPeer(p.id, p.name, false));
                 initWebRTC();
                 break;
             case 'peer_join':
+                Logger.info('Peer joined:', msg.peer.id, msg.peer.name);
                 addPeer(msg.peer.id, msg.peer.name, true);
                 break;
             case 'peer_leave':
+                Logger.info('Peer left:', msg.peer_id);
                 removePeer(msg.peer_id);
                 break;
             case 'offer':
+                Logger.debug('Received offer');
                 {
                     const offer = new RTCSessionDescription({ type: 'offer', sdp: msg.sdp });
                     const offerCollision = makingOffer || pc.signalingState !== 'stable';
                     ignoreOffer = !isPolite && offerCollision;
                     if (ignoreOffer) {
+                        Logger.debug('Ignoring offer due to collision');
                         return;
                     }
                     if (offerCollision) {
+                        Logger.debug('Rolling back local description');
                         await pc.setLocalDescription({ type: 'rollback' });
                     }
                     await pc.setRemoteDescription(offer);
                     await flushPendingIceCandidates();
                     const answer = await pc.createAnswer();
                     await pc.setLocalDescription(answer);
+                    Logger.debug('Sending answer');
                     ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
                 }
                 break;
             case 'answer':
                 if (ignoreOffer) {
+                    Logger.debug('Ignoring answer');
                     return;
                 }
+                Logger.debug('Received answer, setting remote description');
                 await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
                 await flushPendingIceCandidates();
                 break;
             case 'candidate':
+                Logger.debug('Received ICE candidate');
                 await addIceCandidateSafely(msg.candidate);
                 break;
             case 'error':
+                Logger.error('Server error:', msg.message);
                 handleSocketFailure(msg.message || '连接已断开');
                 break;
         }
@@ -969,6 +1131,7 @@ function startSignaling(name) {
 }
 
 function handleSocketFailure(message) {
+    Logger.error('Socket failure:', message);
     if (notifiedDisconnect) return;
     if (isUnloading || didCleanup) return;
     notifiedDisconnect = true;
@@ -985,7 +1148,7 @@ async function addIceCandidateSafely(candidate) {
     try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (e) {
-        console.warn('Failed to add ICE candidate:', e);
+        Logger.warn('Failed to add ICE candidate:', e);
     }
 }
 
@@ -999,6 +1162,7 @@ async function flushPendingIceCandidates() {
 }
 
 function initWebRTC() {
+    Logger.info('Initializing WebRTC with config:', config);
     pc = new RTCPeerConnection(config);
     makingOffer = false;
     ignoreOffer = false;
@@ -1017,20 +1181,39 @@ function initWebRTC() {
 
     pc.onicecandidate = (e) => {
         if (e.candidate) {
+            Logger.debug('ICE candidate gathered:', e.candidate.type);
             ws.send(JSON.stringify({ type: 'candidate', candidate: e.candidate }));
+        } else {
+            Logger.debug('ICE candidate gathering complete');
         }
     };
     pc.oniceconnectionstatechange = () => {
         if (!pc) return;
-        if (pc.iceConnectionState === 'failed') {
+        const currentState = pc.iceConnectionState;
+        Logger.info('ICE connection state:', previousIceState, '->', currentState);
+
+        // Detect recovery from disconnected state
+        if (previousIceState === 'disconnected' && currentState === 'connected') {
+            Logger.info('ICE recovered from disconnected, scheduling audio check');
+            // Schedule a check to verify audio is flowing after recovery
+            scheduleAudioRecoveryCheck();
+        }
+
+        if (currentState === 'failed') {
+            Logger.warn('ICE connection failed, scheduling restart');
             scheduleIceRestart('ice-failed', 0);
-        } else if (pc.iceConnectionState === 'disconnected') {
+        } else if (currentState === 'disconnected') {
+            Logger.warn('ICE disconnected, scheduling restart');
             scheduleIceRestart('ice-disconnected', ICE_RESTART_DISCONNECTED_DELAY);
         }
+
+        previousIceState = currentState;
     };
     pc.onconnectionstatechange = () => {
         if (!pc) return;
+        Logger.info('Connection state:', pc.connectionState);
         if (pc.connectionState === 'failed') {
+            Logger.warn('Connection failed, scheduling restart');
             scheduleIceRestart('pc-failed', 0);
         }
     };
@@ -1038,7 +1221,9 @@ function initWebRTC() {
     pc.ontrack = (e) => {
         const stream = e.streams[0] || new MediaStream([e.track]);
         const peerId = (e.streams[0] && e.streams[0].id) || e.track.id; // StreamID is now forced to be PeerID by the server
+        Logger.info('Received track:', e.track.kind, 'peerId:', peerId);
         if (peerId === myId) {
+            Logger.debug('Ignoring own track');
             return;
         }
 
@@ -1066,21 +1251,55 @@ function initWebRTC() {
 
 
     pc.onnegotiationneeded = async () => {
+        Logger.debug('Negotiation needed');
         try {
             if (makingOffer) {
+                Logger.debug('Already making offer, skipping');
                 return;
             }
             makingOffer = true;
             if (pc.signalingState !== 'stable') {
+                Logger.debug('Signaling state not stable:', pc.signalingState);
                 return;
             }
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
+            Logger.debug('Sending offer');
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
             }
+        } catch (e) {
+            Logger.error('Negotiation error:', e);
         } finally {
             makingOffer = false;
+        }
+    };
+
+    // Handle heartbeat DataChannel from server
+    pc.ondatachannel = (event) => {
+        const dc = event.channel;
+        if (dc.label === 'heartbeat') {
+            Logger.info('Heartbeat DataChannel received from server');
+            let heartbeatCount = 0;
+            dc.onopen = () => {
+                Logger.info('Heartbeat DataChannel opened - keepalive active');
+            };
+            dc.onmessage = (e) => {
+                if (e.data === 'ping') {
+                    heartbeatCount++;
+                    // Log every 12th ping (roughly every minute with 5s interval)
+                    if (heartbeatCount % 12 === 1) {
+                        Logger.info('Heartbeat ping received, pong sent (count: ' + heartbeatCount + ')');
+                    }
+                    dc.send('pong');
+                }
+            };
+            dc.onclose = () => {
+                Logger.warn('Heartbeat DataChannel closed - keepalive stopped');
+            };
+            dc.onerror = (err) => {
+                Logger.error('Heartbeat DataChannel error:', err);
+            };
         }
     };
 
@@ -1098,7 +1317,7 @@ function initWebRTC() {
                 ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
             }
         } catch (e) {
-            console.warn('Initial offer failed:', e);
+            Logger.warn('Initial offer failed:', e);
         } finally {
             makingOffer = false;
         }
@@ -1106,42 +1325,89 @@ function initWebRTC() {
 }
 
 function scheduleIceRestart(reason, delayMs) {
+    Logger.info('Scheduling ICE restart, reason:', reason, 'delay:', delayMs + 'ms');
     if (isTestMode) return;
     if (!pc || !ws || ws.readyState !== WebSocket.OPEN) return;
     const now = Date.now();
-    if (now - lastIceRestartAt < ICE_RESTART_COOLDOWN) return;
+    if (now - lastIceRestartAt < ICE_RESTART_COOLDOWN) {
+        Logger.debug('ICE restart aborted: cooldown');
+        return;
+    }
     if (iceRestartTimer) {
         clearTimeout(iceRestartTimer);
     }
     const delay = Number.isFinite(delayMs) ? delayMs : 0;
     iceRestartTimer = setTimeout(async () => {
         iceRestartTimer = null;
-        if (!pc || pc.signalingState === 'closed') return;
-        if (Date.now() - lastIceRestartAt < ICE_RESTART_COOLDOWN) return;
+        if (!pc || pc.signalingState === 'closed') {
+            Logger.debug('ICE restart aborted: pc closed');
+            return;
+        }
+        if (Date.now() - lastIceRestartAt < ICE_RESTART_COOLDOWN) {
+            Logger.debug('ICE restart aborted: cooldown');
+            return;
+        }
         if (reason === 'ice-disconnected' && pc.iceConnectionState !== 'disconnected') {
+            Logger.debug('ICE restart aborted: state changed');
             return;
         }
         if (pc.signalingState !== 'stable' || makingOffer) {
+            Logger.debug('ICE restart aborted: signaling state not stable');
             return;
         }
         try {
+            Logger.info('Starting ICE restart');
             makingOffer = true;
             const offer = await pc.createOffer({ iceRestart: true });
             await pc.setLocalDescription(offer);
             ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
             lastIceRestartAt = Date.now();
+            Logger.info('ICE restart offer sent');
         } catch (e) {
-            console.warn('ICE restart failed:', e);
+            Logger.warn('ICE restart failed:', e);
         } finally {
             makingOffer = false;
         }
     }, delay);
 }
 
+function scheduleAudioRecoveryCheck() {
+    if (audioRecoveryCheckTimer) {
+        clearTimeout(audioRecoveryCheckTimer);
+    }
+    audioRecoveryCheckTimer = setTimeout(() => {
+        audioRecoveryCheckTimer = null;
+        if (!pc || pc.iceConnectionState !== 'connected') return;
+        if (peers.size === 0) return;
+
+        // Check if any peer has a stream but no audio activity
+        let needsRecovery = false;
+        peers.forEach((peer) => {
+            if (peer.stream && peer.sourceNode) {
+                // Check if the stream has active tracks
+                const tracks = peer.stream.getAudioTracks();
+                if (tracks.length === 0 || tracks.some(t => t.readyState !== 'live' || t.muted)) {
+                    needsRecovery = true;
+                }
+            }
+        });
+
+        // If we detect issues, trigger renegotiation
+        if (needsRecovery) {
+            Logger.info('Audio recovery check: detected silent tracks, triggering renegotiation');
+            scheduleIceRestart('audio-recovery', 0);
+        }
+    }, AUDIO_RECOVERY_CHECK_DELAY);
+}
+
 // 4. UI Helpers
 function addPeer(id, name, animate) {
-    if (id === myId || peers.has(id)) return;
+    if (id === myId || peers.has(id)) {
+        Logger.debug('addPeer skipped: id=', id, 'isSelf=', id === myId, 'exists=', peers.has(id));
+        return;
+    }
     const safeName = (name || '').trim() || '匿名';
+    Logger.info('Adding peer:', id, safeName);
 
     // Sidebar item
     const item = document.createElement('div');
@@ -1161,6 +1427,7 @@ function addPeer(id, name, animate) {
 }
 
 function removePeer(id) {
+    Logger.info('Removing peer:', id);
     const hadPeer = peers.has(id);
     document.getElementById(`user-${id}`)?.remove();
     document.getElementById(`avatar-wrap-${id}`)?.remove();
@@ -1182,6 +1449,7 @@ const ICONS = {
 
 function toggleMute() {
     isMuted = !isMuted;
+    Logger.info('Mute toggled:', isMuted);
     if (!localStream) return;
     const tracks = localStream.getAudioTracks();
     if (tracks.length > 0) {
@@ -1241,6 +1509,7 @@ function removePeerVolumeControl(peerId) {
 
 function setPeerVolume(peerId, percent, valueEl) {
     const clamped = clampPercent(percent);
+    Logger.debug('Setting peer volume:', peerId, clamped + '%');
     if (valueEl) valueEl.textContent = `${clamped}%`;
     const peer = peers.get(peerId);
     if (peer) {
@@ -1255,8 +1524,10 @@ function setPeerVolume(peerId, percent, valueEl) {
 }
 
 function attachRemoteAudio(peerId, stream, audioEl) {
+    Logger.debug('Attaching remote audio for peer:', peerId);
     let peer = peers.get(peerId);
     if (!peer) {
+        Logger.debug('Creating new peer entry for:', peerId);
         peer = { name: peerId, volumePercent: 100 };
         peers.set(peerId, peer);
         addPeerVolumeControl(peerId, peerId);
@@ -1270,8 +1541,10 @@ function attachRemoteAudio(peerId, stream, audioEl) {
     // This avoids silent playback if duplicate tracks / renegotiation produce a new MediaStream for the same peerId.
     if (peer.gainNode) {
         if (peer.stream === stream && peer.sourceNode) {
+            Logger.debug('Same stream and source, skipping');
             return;
         }
+        Logger.debug('Rebinding audio source for peer:', peerId);
         try {
             peer.sourceNode?.disconnect();
         } catch (e) {
@@ -1282,9 +1555,10 @@ function attachRemoteAudio(peerId, stream, audioEl) {
             source.connect(peer.gainNode);
             peer.sourceNode = source;
             peer.stream = stream;
+            Logger.debug('Audio source rebound successfully');
             return;
         } catch (e) {
-            console.warn('Failed to rebind remote audio stream:', e);
+            Logger.warn('Failed to rebind remote audio stream:', e);
             // Fallback: allow the <audio> element to output sound.
             audioEl.volume = 1;
             peer.stream = stream;
@@ -1293,6 +1567,7 @@ function attachRemoteAudio(peerId, stream, audioEl) {
     }
 
     try {
+        Logger.debug('Creating new audio graph for peer:', peerId);
         const source = ctx.createMediaStreamSource(stream);
         const gainNode = ctx.createGain();
         const percent = peer.volumePercent ?? 100;
@@ -1302,8 +1577,9 @@ function attachRemoteAudio(peerId, stream, audioEl) {
         peer.sourceNode = source;
         peer.gainNode = gainNode;
         peer.stream = stream;
+        Logger.debug('Audio graph created, volume:', percent + '%');
     } catch (e) {
-        console.warn('Failed to attach remote audio via WebAudio:', e);
+        Logger.warn('Failed to attach remote audio via WebAudio:', e);
         // Fallback: allow the <audio> element to output sound.
         audioEl.volume = 1;
         peer.stream = stream;

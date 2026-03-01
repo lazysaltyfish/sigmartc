@@ -14,7 +14,8 @@ COPY internal/ internal/
 COPY web/ web/
 
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=${VERSION}" -o /out/sigmartc cmd/server/main.go
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}" -o /out/sigmartc cmd/server/main.go
 
 FROM alpine:3.20
 

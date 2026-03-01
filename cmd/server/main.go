@@ -12,12 +12,14 @@ import (
 	"sigmartc/internal/server"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/pion/ice/v2"
 	"github.com/pion/webrtc/v3"
 )
 
 var Version = "dev"
+var BuildTime = "unknown"
 
 func main() {
 	port := flag.Int("port", 8080, "HTTP Port")
@@ -58,6 +60,9 @@ func main() {
 
 	settings := webrtc.SettingEngine{}
 	settings.SetICEUDPMux(udpMux)
+	// ICE keepalive: send STUN binding indication every 8 seconds to maintain NAT mappings
+	// This helps prevent disconnections when ISP NAT entries expire (typically 30-60s)
+	settings.SetICETimeouts(8*time.Second, 30*time.Second, 5*time.Second)
 
 	api := webrtc.NewAPI(
 		webrtc.WithMediaEngine(m),
@@ -91,6 +96,22 @@ func main() {
 	mux.HandleFunc("/ws", h.HandleWS)
 	mux.Handle("/admin", withSecurityHeaders(http.HandlerFunc(h.HandleAdmin)))
 
+	// Dynamic config.js endpoint (must be before static file server)
+	mux.HandleFunc("/static/js/config.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+		// Always include STUN as fallback for NAT traversal
+		fmt.Fprint(w, "window.ICE_CONFIG={iceServers:[{urls:'stun:stun.l.google.com:19302'}")
+
+		// Add TURN server if configured
+		if *turnServer != "" {
+			fmt.Fprintf(w, ",{urls:'%s',username:'%s',credential:'%s'}", *turnServer, *turnUser, *turnPass)
+		}
+
+		fmt.Fprint(w, "]};")
+	})
+
 	// Frontend Static Files
 	fs := http.FileServer(http.Dir("web/static"))
 	mux.Handle("/static/", withSecurityHeaders(http.StripPrefix("/static/", fs)))
@@ -107,15 +128,11 @@ func main() {
 			}
 			
 			data := struct {
-				Version   string
-				ICEServer string
-				ICEUser   string
-				ICEPass   string
+				Version  string
+				BuildTime string
 			}{
 				Version:   Version,
-				ICEServer: *turnServer,
-				ICEUser:   *turnUser,
-				ICEPass:   *turnPass,
+				BuildTime: BuildTime,
 			}
 
 			if err := tmpl.Execute(w, data); err != nil {

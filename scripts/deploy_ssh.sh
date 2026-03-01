@@ -80,7 +80,8 @@ image="$1"
 context_dir="$2"
 
 VERSION=$(date +%s)
-docker build --build-arg VERSION="$VERSION" -t "$image" "$context_dir"
+BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+docker build --build-arg VERSION="$VERSION" --build-arg BUILD_TIME="$BUILD_TIME" -t "$image" "$context_dir"
 EOF
 
 ssh $SSH_OPTS "$TARGET" bash -s -- \

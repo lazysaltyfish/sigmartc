@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -19,13 +20,15 @@ import (
 )
 
 const (
-	maxRoomPeers    = 10
-	maxNicknameRune = 12
-	wsWriteWait     = 5 * time.Second
-	wsPongWait      = 60 * time.Second
-	wsPingInterval  = 30 * time.Second
-	iceRestartDelay = 5 * time.Second
-	iceRestartMin   = 15 * time.Second
+	maxRoomPeers       = 10
+	maxNicknameRune    = 12
+	wsWriteWait        = 5 * time.Second
+	wsPongWait         = 60 * time.Second
+	wsPingInterval     = 30 * time.Second
+	iceRestartDelay    = 5 * time.Second
+	iceRestartMin      = 15 * time.Second
+	heartbeatInterval  = 5 * time.Second
+	heartbeatTimeout   = 15 * time.Second
 )
 
 var upgrader = websocket.Upgrader{
@@ -280,6 +283,65 @@ func (h *Handler) setupWebRTC(room *Room, peer *Peer) error {
 		// Broadcast this new track to all other peers in the room
 		h.broadcastTrack(room, peer, track)
 	})
+
+	// Create DataChannel for heartbeat keepalive
+	dc, err := pc.CreateDataChannel("heartbeat", nil)
+	if err != nil {
+		slog.Warn("Failed to create heartbeat DataChannel", "peer_id", peer.ID, "err", err)
+		return nil
+	}
+	peer.HeartbeatDC = dc
+
+	// Track last pong received time
+	lastPong := time.Now()
+	var lastPongMu sync.RWMutex
+
+	dc.OnOpen(func() {
+		slog.Debug("Heartbeat DataChannel opened", "peer_id", peer.ID)
+		go func() {
+			ticker := time.NewTicker(heartbeatInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-peer.Done:
+					return
+				case <-ticker.C:
+					if peer.HeartbeatDC == nil {
+						return
+					}
+					// Check if we've received a pong recently
+					lastPongMu.RLock()
+					timeSinceLastPong := time.Since(lastPong)
+					lastPongMu.RUnlock()
+
+					if timeSinceLastPong > heartbeatTimeout {
+						slog.Warn("Heartbeat timeout, connection may be dead", "peer_id", peer.ID)
+						// Don't close connection here, let ICE handle it
+						return
+					}
+
+					// Send ping
+					if err := peer.HeartbeatDC.SendText("ping"); err != nil {
+						slog.Debug("Heartbeat send failed", "peer_id", peer.ID, "err", err)
+						return
+					}
+				}
+			}
+		}()
+	})
+
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		if string(msg.Data) == "pong" {
+			lastPongMu.Lock()
+			lastPong = time.Now()
+			lastPongMu.Unlock()
+		}
+	})
+
+	dc.OnClose(func() {
+		slog.Debug("Heartbeat DataChannel closed", "peer_id", peer.ID)
+	})
+
 	return nil
 }
 
