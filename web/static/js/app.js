@@ -48,6 +48,62 @@ const config = window.ICE_CONFIG || {
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
 };
 
+// Force speaker mode on mobile devices
+// Without this, mobile browsers may randomly route audio to earpiece (low volume) instead of speaker
+let speakerLockAudioContext = null;
+
+async function forceSpeakerMode() {
+    // Only needed on mobile
+    if (!/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+        return;
+    }
+
+    Logger.info('Forcing speaker mode for mobile device');
+
+    // Method 1: Play a silent audio through WebAudio to establish media playback route
+    try {
+        if (!speakerLockAudioContext) {
+            speakerLockAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        const ctx = speakerLockAudioContext;
+
+        if (ctx.state === 'suspended') {
+            await ctx.resume();
+        }
+
+        // Create a short silent tone to "activate" speaker route
+        const oscillator = ctx.createOscillator();
+        const gain = ctx.createGain();
+        gain.gain.value = 0.001; // Nearly silent
+        oscillator.connect(gain).connect(ctx.destination);
+        oscillator.start();
+        oscillator.stop(ctx.currentTime + 0.1);
+
+        Logger.debug('Speaker mode activated via WebAudio');
+    } catch (e) {
+        Logger.warn('Failed to force speaker mode via WebAudio:', e);
+    }
+
+    // Method 2: For iOS Safari, try to force speaker via audio element
+    try {
+        const silentAudio = document.createElement('audio');
+        silentAudio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+        silentAudio.volume = 0.01;
+        // This attribute helps on some Android devices
+        silentAudio.setAttribute('playsinline', '');
+        silentAudio.setAttribute('x-webkit-airplay', 'allow');
+
+        const playPromise = silentAudio.play();
+        if (playPromise) {
+            playPromise.then(() => {
+                Logger.debug('Silent audio played for speaker mode');
+            }).catch(() => {});
+        }
+    } catch (e) {
+        Logger.debug('Silent audio fallback failed:', e);
+    }
+}
+
 const audioControls = window.AudioControls || {
     MAX_PERCENT: 200,
     MIN_PERCENT: 0,
@@ -374,6 +430,12 @@ function cleanupSession({ redirect, showJoin }) {
     // Release screen wake lock
     releaseWakeLock();
 
+    // Close speaker lock audio context
+    if (speakerLockAudioContext) {
+        speakerLockAudioContext.close();
+        speakerLockAudioContext = null;
+    }
+
     if (netStatsManager) {
         netStatsManager.stop();
         netStatsManager = null;
@@ -512,6 +574,9 @@ function handleJoin(name, rawStream) {
 
     // Keep screen on during call
     requestWakeLock();
+
+    // Force speaker mode on mobile (prevents earpiece/low volume issue)
+    forceSpeakerMode();
 
     if (isTestMode) {
         Logger.info('Test mode enabled, skipping signaling');
