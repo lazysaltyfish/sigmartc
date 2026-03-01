@@ -178,11 +178,13 @@ async function releaseWakeLock() {
     }
 }
 
-// Re-acquire wake lock when page becomes visible again
+// Re-acquire wake lock and resume audio contexts when page becomes visible again
 document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState === 'visible' && !roomView.classList.contains('hidden')) {
-        Logger.debug('Page visible again, re-acquiring wake lock');
+        Logger.debug('Page visible again, re-acquiring wake lock and resuming audio');
         await requestWakeLock();
+        // Resume all audio contexts (critical for mobile browsers)
+        resumeAudioContexts();
     }
 });
 
@@ -574,20 +576,22 @@ function createTestToneStream() {
     return destination.stream;
 }
 
-function resumeAudioContexts() {
+async function resumeAudioContexts() {
     Logger.debug('Resuming audio contexts, local:', localAudioContext?.state, 'remote:', remoteAudioContext?.state);
+    const promises = [];
     if (localAudioContext && localAudioContext.state === 'suspended') {
-        localAudioContext.resume();
+        promises.push(localAudioContext.resume().then(() => Logger.debug('Local audio context resumed')));
     }
     if (remoteAudioContext && remoteAudioContext.state === 'suspended') {
-        remoteAudioContext.resume();
+        promises.push(remoteAudioContext.resume().then(() => Logger.debug('Remote audio context resumed')));
     }
     if (testToneContext && testToneContext.state === 'suspended') {
-        testToneContext.resume();
+        promises.push(testToneContext.resume());
     }
     if (vadAudioContext && vadAudioContext.state === 'suspended') {
-        vadAudioContext.resume();
+        promises.push(vadAudioContext.resume());
     }
+    await Promise.all(promises).catch(e => Logger.warn('Error resuming audio contexts:', e));
 }
 
 function setPlaybackHelp(message) {
@@ -1270,18 +1274,27 @@ function initWebRTC() {
 
         // Create audio element to satisfy autoplay policies, but keep output silent.
         let audio = document.getElementById('audio-' + peerId);
-        if (!audio) {
+        const isNewAudio = !audio;
+        if (isNewAudio) {
             audio = document.createElement('audio');
             audio.id = 'audio-' + peerId;
             audio.autoplay = true;
             audio.playsInline = true;
             audioContainer.appendChild(audio);
         }
+
+        // For reconnections: reset srcObject to ensure clean playback
+        if (!isNewAudio && audio.srcObject !== stream) {
+            Logger.debug('Stream changed for existing audio element, peer:', peerId);
+            audio.srcObject = null; // Clear first for some mobile browsers
+        }
         audio.srcObject = stream;
         audio.volume = 0;
+
+        // Always attempt to play on track event (important for reconnections on mobile)
         const playPromise = audio.play();
         if (playPromise && typeof playPromise.catch === 'function') {
-            playPromise.catch(() => { });
+            playPromise.catch(e => Logger.debug('Audio play interrupted (expected on reconnect):', e.message));
         }
         attachRemoteAudio(peerId, stream, audio);
         resumeAudioContexts();
@@ -1578,19 +1591,34 @@ function attachRemoteAudio(peerId, stream, audioEl) {
     peer.audioEl = audioEl;
     const ctx = getRemoteAudioContext();
 
+    // Ensure AudioContext is running (critical for mobile after background/foreground)
+    if (ctx.state === 'suspended') {
+        Logger.debug('AudioContext suspended, resuming...');
+        ctx.resume().catch(e => Logger.warn('Failed to resume AudioContext:', e));
+    }
+
+    // Check if stream actually changed by comparing track IDs
+    const streamId = stream.id;
+    const currentStreamId = peer.stream?.id;
+    const isSameStream = streamId === currentStreamId;
+
     // If this peer already has an audio graph, rebind the source if the MediaStream instance changes.
     // This avoids silent playback if duplicate tracks / renegotiation produce a new MediaStream for the same peerId.
     if (peer.gainNode) {
-        if (peer.stream === stream && peer.sourceNode) {
-            Logger.debug('Same stream and source, skipping');
+        if (isSameStream && peer.sourceNode) {
+            Logger.debug('Same stream (id:', streamId, '), skipping');
             return;
         }
-        Logger.debug('Rebinding audio source for peer:', peerId);
+        Logger.debug('Rebinding audio source for peer:', peerId, 'old stream:', currentStreamId, 'new stream:', streamId);
+
+        // Clean up old source node
         try {
             peer.sourceNode?.disconnect();
         } catch (e) {
             // Best-effort: some browsers throw if a node is already disconnected.
         }
+        peer.sourceNode = null;
+
         try {
             const source = ctx.createMediaStreamSource(stream);
             source.connect(peer.gainNode);
