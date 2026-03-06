@@ -355,7 +355,7 @@ func buildWSURL(serverURL, room, name string) (string, error) {
 func TestE2EMultiUserOnline(t *testing.T) {
 	api := newTestAPI(t)
 	rm := NewRoomManager("test-key", filepath.Join(t.TempDir(), "banned.json"))
-	handler := NewHandler(rm, api)
+	handler := NewHandler(rm, api, nil)
 	handler.ICEConfig = &webrtc.Configuration{}
 
 	mux := http.NewServeMux()
@@ -417,7 +417,7 @@ func TestE2EMultiUserOnline(t *testing.T) {
 func TestE2EMultiUserMesh(t *testing.T) {
 	api := newTestAPI(t)
 	rm := NewRoomManager("test-key", filepath.Join(t.TempDir(), "banned.json"))
-	handler := NewHandler(rm, api)
+	handler := NewHandler(rm, api, nil)
 	handler.ICEConfig = &webrtc.Configuration{}
 
 	mux := http.NewServeMux()

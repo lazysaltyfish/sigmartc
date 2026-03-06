@@ -65,7 +65,7 @@ go build -o bin/sigmartc cmd/server/main.go
 
 # Run (with TURN server for NAT traversal)
 ./bin/sigmartc -port 8080 -admin-key "my-secret-key" \
-  -turn-server turn:your-server:3478 \
+  -turn-server turn:your-server:3478?transport=udp,turn:your-server:3478?transport=tcp,turns:your-server:5349?transport=tcp \
   -turn-user username \
   -turn-pass password
 ```
@@ -76,7 +76,7 @@ go build -o bin/sigmartc cmd/server/main.go
 | `-port` | 8080 | HTTP port |
 | `-admin-key` | change-me-123 | Admin panel secret |
 | `-rtc-udp-port` | 50000 | WebRTC UDP port |
-| `-turn-server` | - | TURN server URL |
+| `-turn-server` | - | Comma-separated TURN server URLs (for example `turn:host:3478?transport=udp,turns:host:5349?transport=tcp`) |
 | `-turn-user` | - | TURN username |
 | `-turn-pass` | - | TURN password |
 

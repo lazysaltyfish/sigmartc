@@ -20,15 +20,15 @@ import (
 )
 
 const (
-	maxRoomPeers       = 10
-	maxNicknameRune    = 12
-	wsWriteWait        = 5 * time.Second
-	wsPongWait         = 60 * time.Second
-	wsPingInterval     = 30 * time.Second
-	iceRestartDelay    = 5 * time.Second
-	iceRestartMin      = 15 * time.Second
-	heartbeatInterval  = 5 * time.Second
-	heartbeatTimeout   = 15 * time.Second
+	maxRoomPeers      = 10
+	maxNicknameRune   = 12
+	wsWriteWait       = 5 * time.Second
+	wsPongWait        = 60 * time.Second
+	wsPingInterval    = 30 * time.Second
+	iceRestartDelay   = 5 * time.Second
+	iceRestartMin     = 15 * time.Second
+	heartbeatInterval = 5 * time.Second
+	heartbeatTimeout  = 15 * time.Second
 )
 
 var upgrader = websocket.Upgrader{
@@ -239,6 +239,9 @@ func (h *Handler) setupWebRTC(room *Room, peer *Peer) error {
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		slog.Info("ICE connection state changed", "peer_id", peer.ID, "state", state.String())
 		switch state {
+		case webrtc.ICEConnectionStateConnected:
+			// Log the selected ICE candidate pair type (host/srflx/relay)
+			h.logICEConnectionType(peer)
 		case webrtc.ICEConnectionStateFailed:
 			h.requestICERestart(peer)
 		case webrtc.ICEConnectionStateDisconnected:
@@ -650,10 +653,12 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 			return
 		}
 		if state == webrtc.SignalingStateHaveLocalOffer {
-			if err := peer.PC.SetLocalDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeRollback}); err != nil {
-				slog.Warn("Rollback failed", "peer_id", peer.ID, "err", err)
-				return
-			}
+			// pion/webrtc does not support rollback from have-local-offer state (see issue #2133).
+			// Use "impolite" mode: ignore the incoming offer and let the client handle the collision.
+			// The client (browser) supports rollback and will handle it correctly.
+			// NegotiationPending was set above, so we'll send a new offer soon.
+			slog.Warn("Offer collision (have-local-offer), dropping incoming offer", "peer_id", peer.ID)
+			return
 		}
 
 		sdp, _ := msg["sdp"].(string)
@@ -815,4 +820,58 @@ func isTrustedProxy(ip net.IP) bool {
 		return false
 	}
 	return ip.IsLoopback() || ip.IsPrivate()
+}
+
+// logICEConnectionType logs the type of ICE connection established (host/srflx/relay)
+func (h *Handler) logICEConnectionType(peer *Peer) {
+	if peer.PC == nil {
+		return
+	}
+
+	// Get the selected ICE candidate pair
+	sctp := peer.PC.SCTP()
+	if sctp == nil {
+		return
+	}
+
+	dtlsTransport := sctp.Transport()
+	if dtlsTransport == nil {
+		return
+	}
+
+	iceTransport := dtlsTransport.ICETransport()
+	if iceTransport == nil {
+		return
+	}
+
+	selectedPair, err := iceTransport.GetSelectedCandidatePair()
+	if err != nil || selectedPair == nil {
+		slog.Debug("Could not get selected ICE candidate pair", "peer_id", peer.ID, "err", err)
+		return
+	}
+
+	// Determine connection type based on candidate types
+	localType := selectedPair.Local.String()
+	remoteType := selectedPair.Remote.String()
+
+	// Classify the connection
+	var connType string
+	switch {
+	case strings.Contains(remoteType, "relay"):
+		connType = "TURN(relay)"
+	case strings.Contains(remoteType, "srflx"):
+		connType = "STUN(srflx)"
+	case strings.Contains(remoteType, "host"):
+		connType = "direct(host)"
+	default:
+		connType = "unknown"
+	}
+
+	logger.LogEvent("ICE_CONNECTED",
+		slog.String("peer_id", peer.ID),
+		slog.String("peer_name", peer.Name),
+		slog.String("conn_type", connType),
+		slog.String("local_candidate", localType),
+		slog.String("remote_candidate", remoteType),
+	)
 }

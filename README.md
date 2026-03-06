@@ -55,7 +55,7 @@ docker run -d --name sigmartc \
   -e ADMIN_KEY=my-secret-key \
   -e PORT=8080 \
   -e RTC_UDP_PORT=50000 \
-  -e TURN_SERVER=turn:your-server.com:3478 \
+  -e TURN_SERVER=turn:your-server.com:3478?transport=udp,turn:your-server.com:3478?transport=tcp,turns:your-server.com:5349?transport=tcp \
   -e TURN_USER=username \
   -e TURN_PASS=password \
   -v sigmartc_data:/data \
@@ -100,11 +100,14 @@ docker run -d --name coturn --restart=always --network=host \
 
 3. Configure GhostTalk with TURN credentials.
 
+If you advertise a `turns:` URL, your TURN server must actually enable TLS on port `5349` with a valid certificate. Otherwise browsers may report `ERR_SSL_PROTOCOL_ERROR`.
+
 ### Required Ports for TURN
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 3478 | UDP+TCP | STUN/TURN signaling |
+| 5349 | TCP | TURN over TLS (`turns:`) |
 | 49160-49200 | UDP | Media relay |
 
 ## Usage
@@ -129,7 +132,7 @@ Command-line flags:
 - `-port` (default `8080`) - HTTP port
 - `-admin-key` (default `change-me-123`) - Admin panel secret
 - `-rtc-udp-port` (default `50000`) - WebRTC ICE UDP port
-- `-turn-server` - TURN server URL (e.g., `turn:1.2.3.4:3478`)
+- `-turn-server` - Comma-separated TURN server URLs (e.g., `turn:1.2.3.4:3478?transport=udp,turns:1.2.3.4:5349?transport=tcp`)
 - `-turn-user` - TURN username
 - `-turn-pass` - TURN password
 
@@ -160,6 +163,7 @@ In Docker, these live under the `/data` volume.
 - **Audio fails / ICE state "failed"**: Check TURN server is running and ports are open
 - **Can't connect at all**: Confirm microphone permissions and firewall settings
 - **Behind reverse proxy**: Ensure WebSocket upgrade headers and trusted `X-Forwarded-For`
+- **Client shows SSL protocol error**: Check `wss://` reverse-proxy/TLS first; if it only affects some networks, add TURN TCP/TLS URLs such as `turns:...:5349?transport=tcp`
 
 ## Architecture
 

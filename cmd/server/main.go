@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
@@ -18,6 +19,65 @@ import (
 	"github.com/pion/webrtc/v3"
 )
 
+const defaultSTUNServer = "stun:stun.l.google.com:19302"
+
+type clientICEConfig struct {
+	ICEServers []clientICEServer `json:"iceServers"`
+}
+
+type clientICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
+
+func parseICEURLs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	urls := make([]string, 0, len(parts))
+	for _, part := range parts {
+		url := strings.TrimSpace(part)
+		if url == "" {
+			continue
+		}
+		urls = append(urls, url)
+	}
+	return urls
+}
+
+func buildICEConfiguration(turnURLs []string, turnUser, turnPass string) *webrtc.Configuration {
+	config := &webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{{URLs: []string{defaultSTUNServer}}},
+	}
+	if len(turnURLs) > 0 {
+		config.ICEServers = append(config.ICEServers, webrtc.ICEServer{
+			URLs:           turnURLs,
+			Username:       turnUser,
+			Credential:     turnPass,
+			CredentialType: webrtc.ICECredentialTypePassword,
+		})
+	}
+	return config
+}
+
+func buildClientICEConfig(turnURLs []string, turnUser, turnPass string) clientICEConfig {
+	config := clientICEConfig{
+		ICEServers: []clientICEServer{{URLs: []string{defaultSTUNServer}}},
+	}
+	if len(turnURLs) > 0 {
+		config.ICEServers = append(config.ICEServers, clientICEServer{
+			URLs:       turnURLs,
+			Username:   turnUser,
+			Credential: turnPass,
+		})
+	}
+	return config
+}
+
+func marshalClientICEConfig(turnURLs []string, turnUser, turnPass string) ([]byte, error) {
+	config := buildClientICEConfig(turnURLs, turnUser, turnPass)
+	return json.Marshal(config)
+}
+
 var Version = "dev"
 var BuildTime = "unknown"
 
@@ -25,10 +85,12 @@ func main() {
 	port := flag.Int("port", 8080, "HTTP Port")
 	adminKey := flag.String("admin-key", "change-me-123", "Admin panel secret key")
 	rtcUDPPort := flag.Int("rtc-udp-port", 50000, "WebRTC ICE UDP port")
-	turnServer := flag.String("turn-server", "", "TURN server URL (e.g., turn:your-server.com:3478)")
+	turnServer := flag.String("turn-server", "", "Comma-separated TURN server URLs (e.g., turn:your-server.com:3478,turns:your-server.com:5349?transport=tcp)")
 	turnUser := flag.String("turn-user", "", "TURN server username")
 	turnPass := flag.String("turn-pass", "", "TURN server password")
 	flag.Parse()
+
+	turnURLs := parseICEURLs(*turnServer)
 
 	// 1. Initialize Logger
 	if err := logger.InitLogger("server.log"); err != nil {
@@ -71,20 +133,9 @@ func main() {
 
 	slog.Info("ICE UDP mux enabled", "port", *rtcUDPPort)
 
-	// Build ICE configuration
-	iceConfig := &webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-		},
-	}
-	if *turnServer != "" {
-		iceConfig.ICEServers = append(iceConfig.ICEServers, webrtc.ICEServer{
-			URLs:           []string{*turnServer},
-			Username:       *turnUser,
-			Credential:     *turnPass,
-			CredentialType: webrtc.ICECredentialTypePassword,
-		})
-		slog.Info("TURN server configured", "server", *turnServer)
+	iceConfig := buildICEConfiguration(turnURLs, *turnUser, *turnPass)
+	if len(turnURLs) > 0 {
+		slog.Info("TURN server configured", "servers", turnURLs)
 	}
 
 	h := server.NewHandler(rm, api, iceConfig)
@@ -101,15 +152,14 @@ func main() {
 		w.Header().Set("Content-Type", "application/javascript")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 
-		// Always include STUN as fallback for NAT traversal
-		fmt.Fprint(w, "window.ICE_CONFIG={iceServers:[{urls:'stun:stun.l.google.com:19302'}")
-
-		// Add TURN server if configured
-		if *turnServer != "" {
-			fmt.Fprintf(w, ",{urls:'%s',username:'%s',credential:'%s'}", *turnServer, *turnUser, *turnPass)
+		clientConfig, err := marshalClientICEConfig(turnURLs, *turnUser, *turnPass)
+		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			slog.Error("Failed to marshal ICE config", "err", err)
+			return
 		}
 
-		fmt.Fprint(w, "]};")
+		fmt.Fprintf(w, "window.ICE_CONFIG=%s;", clientConfig)
 	})
 
 	// Frontend Static Files
@@ -126,9 +176,9 @@ func main() {
 				slog.Error("Failed to parse template", "err", err)
 				return
 			}
-			
+
 			data := struct {
-				Version  string
+				Version   string
 				BuildTime string
 			}{
 				Version:   Version,

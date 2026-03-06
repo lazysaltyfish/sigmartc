@@ -13,7 +13,7 @@ From the project root:
 
 ```bash
 ADMIN_KEY=your-secret \
-TURN_SERVER=turn:your-turn-server:3478 \
+TURN_SERVER=turn:your-turn-server:3478?transport=udp,turn:your-turn-server:3478?transport=tcp,turns:your-turn-server:5349?transport=tcp \
 TURN_USER=ghosttalk \
 TURN_PASS=your-password \
 NETWORK_MODE=host \
@@ -35,7 +35,7 @@ ADMIN_KEY=your-secret \
 PORT=8080 \
 NETWORK_MODE=host \
 UDP_PORT=50000 \
-TURN_SERVER=turn:1.2.3.4:3478 \
+TURN_SERVER=turn:1.2.3.4:3478?transport=udp,turn:1.2.3.4:3478?transport=tcp,turns:1.2.3.4:5349?transport=tcp \
 TURN_USER=ghosttalk \
 TURN_PASS=your-password \
 ./scripts/deploy_ssh.sh user@host /opt/sigmartc
@@ -57,7 +57,7 @@ PORT=8080 NETWORK_MODE=bridge HTTP_BIND_HOST=0.0.0.0 \
 | `NETWORK_MODE` | `bridge` | Docker network mode (`host` or `bridge`) |
 | `UDP_PORT` | `50000` | WebRTC UDP port |
 | `HTTP_BIND_HOST` | `127.0.0.1` | HTTP bind address (bridge mode only) |
-| `TURN_SERVER` | - | TURN server URL (e.g., `turn:1.2.3.4:3478`) |
+| `TURN_SERVER` | - | Comma-separated TURN server URLs (e.g., `turn:1.2.3.4:3478?transport=udp,turns:1.2.3.4:5349?transport=tcp`) |
 | `TURN_USER` | - | TURN username |
 | `TURN_PASS` | - | TURN password |
 | `IMAGE_NAME` | `sigmartc` | Docker image name |
@@ -103,18 +103,22 @@ docker run -d --name coturn --restart=always --network=host \
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 3478 | UDP+TCP | STUN/TURN |
+| 5349 | TCP | TURN over TLS (`turns:`) |
 | 49160-49200 | UDP | Media relay |
 
 ```bash
 # ufw example
 ufw allow 3478/tcp
 ufw allow 3478/udp
+ufw allow 5349/tcp
 ufw allow 49160:49200/udp
 ```
 
 ### 4. Configure GhostTalk
 
 Pass TURN credentials when deploying GhostTalk.
+
+If you advertise a `turns:` URL, your TURN server must actually enable TLS on port `5349` with a valid certificate. Otherwise browsers may report `ERR_SSL_PROTOCOL_ERROR`.
 
 ## Local Docker build/run
 
@@ -131,7 +135,7 @@ docker run -d --name sigmartc \
   -e ADMIN_KEY=your-secret \
   -e PORT=8080 \
   -e RTC_UDP_PORT=50000 \
-  -e TURN_SERVER=turn:1.2.3.4:3478 \
+  -e TURN_SERVER=turn:1.2.3.4:3478?transport=udp,turn:1.2.3.4:3478?transport=tcp,turns:1.2.3.4:5349?transport=tcp \
   -e TURN_USER=ghosttalk \
   -e TURN_PASS=your-password \
   -v sigmartc_data:/data \
@@ -148,7 +152,7 @@ docker run -d --name sigmartc \
   -e ADMIN_KEY=your-secret \
   -e PORT=8080 \
   -e RTC_UDP_PORT=50000 \
-  -e TURN_SERVER=turn:1.2.3.4:3478 \
+  -e TURN_SERVER=turn:1.2.3.4:3478?transport=udp,turn:1.2.3.4:3478?transport=tcp,turns:1.2.3.4:5349?transport=tcp \
   -e TURN_USER=ghosttalk \
   -e TURN_PASS=your-password \
   -v sigmartc_data:/data \
@@ -175,3 +179,4 @@ Keep the app bound to localhost so `X-Forwarded-For` can only come from the prox
 | WebSocket pending | Reverse proxy WebSocket config? |
 | Can't hear audio | Microphone permission? UDP 50000 open? |
 | Some users can't connect | They may need TURN - check if TURN is configured |
+| Client shows `ERR_SSL_PROTOCOL_ERROR` | Check `wss://` reverse proxy first; if only some networks fail, make sure TURN TLS really listens on `turns:...:5349` and advertise both TCP/TLS URLs |
