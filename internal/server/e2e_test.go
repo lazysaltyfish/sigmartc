@@ -137,6 +137,15 @@ func newE2EClient(t *testing.T, serverURL, room, name string, api *webrtc.API, w
 		if len(params.Encodings) > 0 && params.Encodings[0].SSRC != 0 {
 			client.ssrc = uint32(params.Encodings[0].SSRC)
 		}
+	} else {
+		_, err := pc.AddTransceiverFromKind(
+			webrtc.RTPCodecTypeAudio,
+			webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly},
+		)
+		if err != nil {
+			client.Close()
+			return nil, err
+		}
 	}
 
 	if err := client.sendOffer(); err != nil {
@@ -155,9 +164,13 @@ func (c *e2eClient) sendOffer() error {
 	if err := c.pc.SetLocalDescription(offer); err != nil {
 		return err
 	}
+	localDesc := c.pc.LocalDescription()
+	if localDesc == nil {
+		return fmt.Errorf("missing local description after offer")
+	}
 	return c.send(map[string]any{
 		"type": "offer",
-		"sdp":  offer.SDP,
+		"sdp":  localDesc.SDP,
 	})
 }
 
@@ -198,9 +211,14 @@ func (c *e2eClient) readLoop() {
 				c.t.Logf("SetLocalDescription answer failed: %v", err)
 				continue
 			}
+			localDesc := c.pc.LocalDescription()
+			if localDesc == nil {
+				c.t.Logf("missing local description after answer")
+				continue
+			}
 			_ = c.send(map[string]any{
 				"type": "answer",
-				"sdp":  answer.SDP,
+				"sdp":  localDesc.SDP,
 			})
 		case "answer":
 			sdp, _ := msg["sdp"].(string)

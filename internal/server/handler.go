@@ -584,9 +584,19 @@ func (h *Handler) runNegotiation(peer *Peer) {
 			continue
 		}
 
+		localDesc := pc.LocalDescription()
+		if localDesc == nil {
+			slog.Warn("Missing local description after offer", "peer_id", peer.ID)
+			peer.NegotiationMu.Lock()
+			peer.NegotiationPending = true
+			peer.NegotiationMu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
 		peer.WriteJSON(map[string]any{
 			"type": "offer",
-			"sdp":  offer.SDP,
+			"sdp":  localDesc.SDP,
 		})
 	}
 }
@@ -678,9 +688,14 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 		if err = peer.PC.SetLocalDescription(answer); err != nil {
 			return
 		}
+		localDesc := peer.PC.LocalDescription()
+		if localDesc == nil {
+			slog.Warn("Missing local description after answer", "peer_id", peer.ID)
+			return
+		}
 		peer.WriteJSON(map[string]any{
 			"type": "answer",
-			"sdp":  answer.SDP,
+			"sdp":  localDesc.SDP,
 		})
 		if offerCollision {
 			h.requestNegotiation(peer)
