@@ -259,6 +259,175 @@ const inputHelp = document.getElementById('input-help');
 const peerVolumeList = document.getElementById('peer-volume-list');
 const peerVolumeEmpty = document.getElementById('peer-volume-empty');
 const btnMixer = document.getElementById('btn-mixer');
+const diagnosticsOverlay = document.getElementById('connection-diagnostics');
+const diagnosticSummary = document.getElementById('diagnostic-summary');
+const diagnosticDetails = document.getElementById('diagnostic-details');
+const btnCopyDiagnostics = document.getElementById('btn-copy-diagnostics');
+const btnCloseDiagnostics = document.getElementById('btn-close-diagnostics');
+let lastConnectionDiagnosticText = '';
+
+function getBrowserLabel() {
+    const userAgentData = navigator.userAgentData;
+    if (userAgentData && Array.isArray(userAgentData.brands) && userAgentData.brands.length > 0) {
+        return userAgentData.brands.map((brand) => `${brand.brand} ${brand.version}`).join(', ');
+    }
+
+    const userAgent = navigator.userAgent || '';
+    const matchers = [
+        [/Edg\/([\d.]+)/, 'Edge'],
+        [/OPR\/([\d.]+)/, 'Opera'],
+        [/Chrome\/([\d.]+)/, 'Chrome'],
+        [/Firefox\/([\d.]+)/, 'Firefox'],
+        [/Version\/([\d.]+).*Safari/, 'Safari']
+    ];
+
+    for (const [pattern, name] of matchers) {
+        const match = userAgent.match(pattern);
+        if (match) return `${name} ${match[1]}`;
+    }
+
+    return '未知浏览器';
+}
+
+function getPlatformLabel() {
+    const userAgentData = navigator.userAgentData;
+    if (userAgentData && userAgentData.platform) {
+        return userAgentData.platform;
+    }
+    return navigator.platform || '未知平台';
+}
+
+function getPageTransportLabel() {
+    try {
+        const [navigationEntry] = performance.getEntriesByType('navigation');
+        return navigationEntry && navigationEntry.nextHopProtocol ? navigationEntry.nextHopProtocol : 'unknown';
+    } catch (error) {
+        Logger.debug('Failed to read navigation protocol:', error);
+        return 'unknown';
+    }
+}
+
+function getWebSocketReadyStateLabel(readyState) {
+    const states = {
+        0: 'CONNECTING',
+        1: 'OPEN',
+        2: 'CLOSING',
+        3: 'CLOSED'
+    };
+    return states[readyState] || 'UNKNOWN';
+}
+
+function getCloseCodeLabel(closeCode) {
+    const meanings = {
+        1000: '正常关闭',
+        1001: '页面离开或服务关闭',
+        1005: '未收到关闭代码',
+        1006: '异常断开',
+        1011: '服务内部错误',
+        1012: '服务重启',
+        1013: '服务暂时过载',
+        1015: 'TLS 握手失败'
+    };
+    if (closeCode === undefined || closeCode === null || closeCode === '') {
+        return '-';
+    }
+    const meaning = meanings[closeCode];
+    return meaning ? `${closeCode} (${meaning})` : String(closeCode);
+}
+
+function getConnectionLabel() {
+    const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (!connection) return '-';
+
+    const parts = [];
+    if (connection.effectiveType) parts.push(`类型=${connection.effectiveType}`);
+    if (typeof connection.rtt === 'number') parts.push(`RTT=${connection.rtt}ms`);
+    if (typeof connection.downlink === 'number') parts.push(`下行=${connection.downlink}Mb/s`);
+    if (typeof connection.saveData === 'boolean') parts.push(`省流=${connection.saveData ? '是' : '否'}`);
+    return parts.length > 0 ? parts.join(', ') : '-';
+}
+
+function getSignalUrl(name) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const nicknameInput = document.getElementById('nickname');
+    const nickname = name || localName || (nicknameInput ? nicknameInput.value.trim() : '') || 'unknown';
+    return `${protocol}//${window.location.host}/ws?room=${encodeURIComponent(roomUUID)}&name=${encodeURIComponent(nickname)}`;
+}
+
+function buildConnectionDiagnosticReport(message, details = {}) {
+    const closeCode = details.closeCode;
+    const reportLines = [
+        '请把以下信息复制给管理员：',
+        `故障摘要: ${message}`,
+        `时间: ${new Date().toISOString()}`,
+        `页面地址: ${window.location.href}`,
+        `信令地址: ${getSignalUrl(details.name)}`,
+        `房间: ${roomUUID || '-'}`,
+        `昵称: ${localName || details.name || '-'}`,
+        `浏览器: ${getBrowserLabel()}`,
+        `系统: ${getPlatformLabel()}`,
+        `语言: ${navigator.language || '-'}`,
+        `页面协议: ${window.location.protocol || '-'}`,
+        `页面传输: ${getPageTransportLabel()}`,
+        `安全上下文: ${window.isSecureContext ? '是' : '否'}`,
+        `网络在线: ${navigator.onLine ? '是' : '否'}`,
+        `网络信息: ${getConnectionLabel()}`,
+        `页面可见状态: ${document.visibilityState}`,
+        `WebSocket阶段: ${details.source || '-'}`,
+        `WebSocket事件: ${details.eventType || '-'}`,
+        `WebSocket状态: ${getWebSocketReadyStateLabel(details.readyState ?? (ws ? ws.readyState : undefined))}`,
+        `关闭代码: ${getCloseCodeLabel(closeCode)}`,
+        `关闭原因: ${details.closeReason || '-'}`,
+        `服务端消息: ${details.serverMessage || '-'}`,
+        `User-Agent: ${navigator.userAgent || '-'}`
+    ];
+
+    if (details.wasClean !== undefined) {
+        reportLines.splice(20, 0, `是否正常关闭: ${details.wasClean ? '是' : '否'}`);
+    }
+
+    reportLines.push('');
+    reportLines.push('说明: 如果网页能打开，但这里只有实时连接失败，通常是安全 WebSocket 在建立时被浏览器、网络或代理中断。');
+    return reportLines.join('\n');
+}
+
+function showConnectionDiagnostics(message, details = {}) {
+    if (!diagnosticsOverlay || !diagnosticSummary || !diagnosticDetails) {
+        alert(message);
+        return;
+    }
+
+    const summaryMessage = `${message}。如果你不会处理，请点击“复制诊断信息”发给管理员。`;
+    lastConnectionDiagnosticText = buildConnectionDiagnosticReport(message, details);
+    diagnosticSummary.textContent = summaryMessage;
+    diagnosticDetails.value = lastConnectionDiagnosticText;
+    diagnosticsOverlay.classList.remove('hidden');
+}
+
+function hideConnectionDiagnostics() {
+    if (!diagnosticsOverlay) return;
+    diagnosticsOverlay.classList.add('hidden');
+}
+
+async function copyConnectionDiagnostics() {
+    if (!lastConnectionDiagnosticText) return;
+
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(lastConnectionDiagnosticText);
+        } else if (diagnosticDetails) {
+            diagnosticDetails.focus();
+            diagnosticDetails.select();
+            document.execCommand('copy');
+        } else {
+            throw new Error('clipboard unavailable');
+        }
+        alert('诊断信息已复制，请直接发给管理员。');
+    } catch (error) {
+        Logger.warn('Failed to copy diagnostics:', error);
+        alert('复制失败，请手动选中文本后复制。');
+    }
+}
 
 // --- Network Stats Manager ---
 class NetworkStatsManager {
@@ -541,6 +710,21 @@ document.getElementById('btn-copy').onclick = () => {
     navigator.clipboard.writeText(window.location.href);
     alert('链接已复制到剪贴板');
 };
+if (btnCopyDiagnostics) {
+    btnCopyDiagnostics.onclick = () => {
+        copyConnectionDiagnostics();
+    };
+}
+if (btnCloseDiagnostics) {
+    btnCloseDiagnostics.onclick = () => {
+        hideConnectionDiagnostics();
+    };
+}
+document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+        hideConnectionDiagnostics();
+    }
+});
 
 initPlaybackDevices();
 initInputDevices();
@@ -548,6 +732,7 @@ initNoiseSuppressionControls();
 
 function handleJoin(name, rawStream) {
     Logger.info('Joining room as:', name);
+    hideConnectionDiagnostics();
     localName = name;
     didCleanup = false;
     isUnloading = false;
@@ -1165,7 +1350,15 @@ function startSignaling(name) {
             return;
         }
         if (!notifiedDisconnect) {
-            handleSocketFailure('连接已断开');
+            handleSocketFailure('连接已断开', {
+                source: 'ws.onclose',
+                eventType: 'close',
+                closeCode: e.code,
+                closeReason: e.reason,
+                wasClean: e.wasClean,
+                readyState: ws ? ws.readyState : undefined,
+                name
+            });
         }
     };
     ws.onerror = (e) => {
@@ -1174,7 +1367,12 @@ function startSignaling(name) {
             return;
         }
         if (!notifiedDisconnect) {
-            handleSocketFailure('连接失败');
+            handleSocketFailure('连接失败', {
+                source: 'ws.onerror',
+                eventType: e && e.type ? e.type : 'error',
+                readyState: ws ? ws.readyState : undefined,
+                name
+            });
         }
     };
 
@@ -1234,19 +1432,24 @@ function startSignaling(name) {
                 break;
             case 'error':
                 Logger.error('Server error:', msg.message);
-                handleSocketFailure(msg.message || '连接已断开');
+                handleSocketFailure(msg.message || '连接已断开', {
+                    source: 'server-error',
+                    eventType: 'server-message',
+                    serverMessage: msg.message,
+                    readyState: ws ? ws.readyState : undefined
+                });
                 break;
         }
     };
 }
 
-function handleSocketFailure(message) {
-    Logger.error('Socket failure:', message);
+function handleSocketFailure(message, details = {}) {
+    Logger.error('Socket failure:', message, details);
     if (notifiedDisconnect) return;
     if (isUnloading || didCleanup) return;
     notifiedDisconnect = true;
-    alert(message);
-    leaveRoom();
+    showConnectionDiagnostics(message, details);
+    cleanupSession({ redirect: false, showJoin: true });
 }
 
 async function addIceCandidateSafely(candidate) {

@@ -416,6 +416,81 @@ input:focus-visible,
 #btn-copy { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
 #btn-copy:hover { background: var(--accent); color: #fff; }
 
+.diagnostic-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.78);
+}
+
+.diagnostic-card {
+    width: min(560px, 100%);
+    max-height: min(80vh, 720px);
+    padding: 24px;
+    border-radius: 12px;
+    background: var(--bg-dark);
+    box-shadow: 0 18px 36px rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.diagnostic-card h2 {
+    margin: 0;
+    color: #fff;
+}
+
+.diagnostic-summary,
+.diagnostic-help {
+    margin: 0;
+    line-height: 1.5;
+}
+
+.diagnostic-summary {
+    color: var(--text-normal);
+}
+
+.diagnostic-help {
+    color: var(--text-muted);
+    font-size: 0.9em;
+}
+
+.diagnostic-details {
+    min-height: 220px;
+    max-height: 42vh;
+    resize: vertical;
+    overflow: auto;
+    padding: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    background: var(--bg-darker);
+    color: var(--text-normal);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.diagnostic-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.diagnostic-secondary {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    color: var(--text-normal);
+}
+
+.diagnostic-secondary:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
 @media (max-width: 720px) and (orientation: portrait) {
     body {
         height: 100svh;
@@ -516,6 +591,28 @@ input:focus-visible,
     }
 
     #btn-copy {
+        width: 100%;
+    }
+
+    .diagnostic-overlay {
+        padding: 12px;
+    }
+
+    .diagnostic-card {
+        width: 100%;
+        padding: 18px;
+    }
+
+    .diagnostic-details {
+        min-height: 180px;
+        max-height: 44vh;
+    }
+
+    .diagnostic-actions {
+        flex-direction: column;
+    }
+
+    .diagnostic-actions button {
         width: 100%;
     }
 }

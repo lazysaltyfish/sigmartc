@@ -148,6 +148,20 @@
     <!-- Audio elements will be managed dynamically by JS -->
     <div id="audio-container" class="audio-container" aria-hidden="true"></div>
 
+    <div id="connection-diagnostics" class="diagnostic-overlay hidden" role="dialog" aria-modal="true"
+        aria-labelledby="diagnostic-title">
+        <div class="diagnostic-card">
+            <h2 id="diagnostic-title">连接诊断信息</h2>
+            <p id="diagnostic-summary" class="diagnostic-summary"></p>
+            <p class="diagnostic-help">如果你看不懂这些内容，直接点击“复制诊断信息”发给管理员即可。</p>
+            <textarea id="diagnostic-details" class="diagnostic-details" readonly spellcheck="false"></textarea>
+            <div class="diagnostic-actions">
+                <button id="btn-copy-diagnostics">复制诊断信息</button>
+                <button id="btn-close-diagnostics" class="diagnostic-secondary">关闭</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/static/js/config.js?v={{.Version}}"></script>
     <script src="/static/js/audio_controls.js?v={{.Version}}"></script>
     <script src="/static/js/app.js?v={{.Version}}"></script>
