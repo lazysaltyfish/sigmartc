@@ -203,9 +203,11 @@ let iceRestartTimer = null;
 let lastIceRestartAt = 0;
 let previousIceState = '';
 let audioRecoveryCheckTimer = null;
+let wsKeepaliveTimer = null;
 const ICE_RESTART_COOLDOWN = 15000;
 const ICE_RESTART_DISCONNECTED_DELAY = 4000;
 const AUDIO_RECOVERY_CHECK_DELAY = 2000;
+const WS_KEEPALIVE_INTERVAL = 25000;
 
 // --- Wake Lock Manager (keeps screen on during call) ---
 let wakeLock = null;
@@ -617,6 +619,7 @@ function cleanupSession({ redirect, showJoin }) {
         clearTimeout(audioRecoveryCheckTimer);
         audioRecoveryCheckTimer = null;
     }
+    stopWebSocketKeepalive();
 
     // 1. Close WebRTC
     if (pc) {
@@ -1342,10 +1345,12 @@ function startSignaling(name) {
 
     ws.onopen = () => {
         Logger.info('WebSocket connected');
+        startWebSocketKeepalive();
     };
 
     ws.onclose = (e) => {
         Logger.info('WebSocket closed, code:', e.code, 'reason:', e.reason);
+        stopWebSocketKeepalive();
         if (isUnloading || document.visibilityState !== 'visible') {
             return;
         }
@@ -1441,6 +1446,24 @@ function startSignaling(name) {
                 break;
         }
     };
+}
+
+function startWebSocketKeepalive() {
+    stopWebSocketKeepalive();
+    wsKeepaliveTimer = setInterval(() => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        try {
+            ws.send(JSON.stringify({ type: 'heartbeat', ts: Date.now() }));
+        } catch (error) {
+            Logger.debug('Signaling heartbeat send failed:', error);
+        }
+    }, WS_KEEPALIVE_INTERVAL);
+}
+
+function stopWebSocketKeepalive() {
+    if (!wsKeepaliveTimer) return;
+    clearInterval(wsKeepaliveTimer);
+    wsKeepaliveTimer = null;
 }
 
 function handleSocketFailure(message, details = {}) {

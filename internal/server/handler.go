@@ -183,8 +183,23 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
+			var closeErr *websocket.CloseError
+			switch {
+			case errors.As(err, &closeErr):
+				slog.Info("WebSocket closed", "peer_id", peer.ID, "code", closeErr.Code, "reason", closeErr.Text)
+			case errors.Is(err, net.ErrClosed):
+				slog.Info("WebSocket closed", "peer_id", peer.ID, "err", err)
+			default:
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					slog.Warn("WebSocket read timeout", "peer_id", peer.ID, "err", err)
+				} else {
+					slog.Warn("WebSocket read failed", "peer_id", peer.ID, "err", err)
+				}
+			}
 			break
 		}
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 
 		var msg map[string]interface{}
 		if err := json.Unmarshal(message, &msg); err != nil {
@@ -648,6 +663,9 @@ func waitForNegotiationStable(pc *webrtc.PeerConnection, timeout time.Duration) 
 func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]any) {
 	t, ok := msg["type"].(string)
 	if !ok {
+		return
+	}
+	if t == "heartbeat" {
 		return
 	}
 	if peer.PC == nil {
