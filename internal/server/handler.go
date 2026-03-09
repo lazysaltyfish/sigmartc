@@ -466,9 +466,15 @@ func (h *Handler) subscribeToForwarder(receiver *Peer, senderID string, forwarde
 	receiver.OutTracks[senderID] = localTrack
 	receiver.OutTracksMu.Unlock()
 
+	// RTCP reader: read RTCP feedback until peer disconnects
 	go func() {
 		rtcpBuf := make([]byte, 1500)
 		for {
+			select {
+			case <-receiver.Done:
+				return
+			default:
+			}
 			if _, _, rtcpErr := sender.Read(rtcpBuf); rtcpErr != nil {
 				return
 			}
@@ -650,6 +656,11 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 
 	switch t {
 	case "offer":
+		sdp, ok := msg["sdp"].(string)
+		if !ok || sdp == "" {
+			slog.Warn("Invalid offer: missing or invalid SDP", "peer_id", peer.ID)
+			return
+		}
 		state := peer.PC.SignalingState()
 		peer.NegotiationMu.Lock()
 		offerCollision := peer.MakingOffer || state == webrtc.SignalingStateHaveLocalOffer
@@ -671,7 +682,6 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 			return
 		}
 
-		sdp, _ := msg["sdp"].(string)
 		err := peer.PC.SetRemoteDescription(webrtc.SessionDescription{
 			Type: webrtc.SDPTypeOffer,
 			SDP:  sdp,
@@ -702,7 +712,11 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 		}
 
 	case "answer":
-		sdp, _ := msg["sdp"].(string)
+		sdp, ok := msg["sdp"].(string)
+		if !ok || sdp == "" {
+			slog.Warn("Invalid answer: missing or invalid SDP", "peer_id", peer.ID)
+			return
+		}
 		if err := peer.PC.SetRemoteDescription(webrtc.SessionDescription{
 			Type: webrtc.SDPTypeAnswer,
 			SDP:  sdp,
@@ -713,10 +727,19 @@ func (h *Handler) handleSignalingMessage(room *Room, peer *Peer, msg map[string]
 		h.flushPendingCandidates(peer)
 
 	case "candidate":
-		candidateData, _ := msg["candidate"].(map[string]any)
-		candidateJSON, _ := json.Marshal(candidateData)
+		candidateData, ok := msg["candidate"].(map[string]any)
+		if !ok {
+			slog.Warn("Invalid candidate: not a map", "peer_id", peer.ID)
+			return
+		}
+		candidateJSON, err := json.Marshal(candidateData)
+		if err != nil {
+			slog.Warn("Failed to marshal candidate", "peer_id", peer.ID, "err", err)
+			return
+		}
 		var candidate webrtc.ICECandidateInit
 		if err := json.Unmarshal(candidateJSON, &candidate); err != nil {
+			slog.Warn("Failed to unmarshal candidate", "peer_id", peer.ID, "err", err)
 			return
 		}
 		if peer.PC.RemoteDescription() == nil {

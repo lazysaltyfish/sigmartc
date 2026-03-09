@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"runtime"
 	"strings"
@@ -31,6 +32,11 @@ func (h *Handler) HandleAdmin(w http.ResponseWriter, r *http.Request) {
 		ip := r.URL.Query().Get("ip")
 		ip = strings.TrimSpace(ip)
 		if ip != "" {
+			parsedIP := net.ParseIP(ip)
+			if parsedIP == nil {
+				http.Error(w, "Invalid IP address", http.StatusBadRequest)
+				return
+			}
 			h.RoomManager.BanIP(ip)
 			fmt.Fprintf(w, "Banned %s", ip)
 		}
